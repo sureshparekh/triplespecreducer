@@ -1,0 +1,12 @@
+The icons in this folder are Lucide, used unmodified in outline and shape.
+
+Lucide is ISC licensed. Copyright (c) for portions of Lucide are held by
+Cole Bemis 2013-2022 as part of Feather (MIT). All other copyright (c) for
+Lucide are held by Lucide Contributors 2022.
+
+https://lucide.dev
+
+Every file carries stroke="currentColor" and no colour of its own. BRAIN
+substitutes a palette token for that string at paint time, so an icon is
+text_dim when it is idle and the accent when it is active without a second
+copy of it existing.

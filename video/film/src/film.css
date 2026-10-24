@@ -1,0 +1,64 @@
+/* The films' look: sureshparekh.github.io's ground, palette, type and liquid glass. */
+:root {
+  --bg: #06070b; --text: #eef0f5; --muted: #a3aaba; --dim: #6b7385; --line: #ffffff13;
+  --accent: #f4a259; --orange: #f39b4a; --red: #ff6a3d; --blue: #5b8cff; --sky: #8fb6ff;
+  --violet: #c8a2ff; --green: #7fd0a8;
+  --font: "Geist", system-ui, sans-serif; --mono: "Geist Mono", ui-monospace, monospace;
+  --serif: "Instrument Serif", Georgia, serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); overflow: hidden; }
+#frame { position: relative; width: 1920px; height: 1080px; overflow: hidden; background: var(--bg);
+         color: var(--text); font: 400 26px/1.45 var(--font); -webkit-font-smoothing: antialiased; }
+#sky, #world, #hud, #grain { position: absolute; inset: 0; }
+#sky { z-index: 0; }
+#world { z-index: 1; }
+#hud { z-index: 5; pointer-events: none; }
+#grain { z-index: 9; pointer-events: none; opacity: .055; mix-blend-mode: overlay;
+         background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='220' height='220'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>"); }
+.glow { position: absolute; border-radius: 50%; filter: blur(80px); will-change: transform, opacity; }
+
+/* liquid glass, as on the website (liquid.js adds the refraction in Chromium) */
+.glass {
+  position: absolute; --lgf: blur(14px);
+  background: linear-gradient(180deg, rgba(14, 16, 24, 0.20), rgba(10, 12, 18, 0.12));
+  -webkit-backdrop-filter: blur(14px) saturate(165%) brightness(.97);
+  backdrop-filter: var(--lgf) saturate(165%) brightness(.97);
+  border: 1px solid transparent; border-radius: 26px; isolation: isolate;
+  box-shadow: inset 0 1px 1px rgba(255,255,255,.30), inset 0 -1px 1px rgba(255,255,255,.07),
+              0 1px 2px rgba(0,0,0,.30), 0 14px 44px rgba(0,0,0,.36);
+}
+.glass::after {
+  content: ""; position: absolute; inset: -1px; border-radius: inherit; pointer-events: none; z-index: 1; padding: 1px;
+  background: linear-gradient(150deg, rgba(255,255,255,.50) 0%, rgba(255,255,255,.08) 30%, rgba(255,255,255,.02) 55%,
+              rgba(255,255,255,.08) 80%, rgba(255,255,255,.28) 100%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); opacity: .75;
+}
+.glass.dark { background: linear-gradient(180deg, rgba(16,18,26,.62), rgba(10,12,18,.54)); }
+.glass.pill { border-radius: 999px; }
+
+.eyebrow { font: 500 20px/1 var(--mono); letter-spacing: .22em; text-transform: uppercase; color: var(--accent); }
+.title { font: 400 84px/1.02 var(--serif); letter-spacing: -.01em; }
+.title em { font-style: italic; color: var(--accent); }
+.h2 { font: 600 44px/1.1 var(--font); letter-spacing: -.015em; }
+.h3 { font: 600 30px/1.2 var(--font); }
+.body { font: 400 26px/1.45 var(--font); color: #dfe3ec; }
+.muted { color: var(--muted); }
+.mono { font-family: var(--mono); }
+.label { font: 500 19px/1.2 var(--mono); color: var(--muted); letter-spacing: .04em; }
+.chip { position: absolute; display: inline-flex; align-items: center; gap: 12px; padding: 12px 22px; font: 500 22px/1 var(--font); white-space: nowrap; }
+.chip .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 14px var(--accent); }
+.eq { font: 400 46px/1.25 var(--serif); font-style: italic; letter-spacing: .01em; white-space: nowrap; }
+.eq .up { font-style: normal; font-family: var(--font); font-size: .62em; vertical-align: .45em; }
+.eq .dn { font-style: normal; font-family: var(--font); font-size: .55em; vertical-align: -.35em; }
+.frac { display: inline-flex; flex-direction: column; align-items: center; vertical-align: middle; margin: 0 .15em; }
+.frac > span:first-child { border-bottom: 2px solid currentColor; padding: 0 .2em .06em; }
+.frac > span:last-child { padding: .06em .2em 0; }
+.shot { position: absolute; overflow: hidden; border-radius: 18px; }
+.shot img { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.cap { position: absolute; left: 50%; bottom: 46px; transform: translateX(-50%); max-width: 1500px;
+       padding: 18px 34px; font: 400 29px/1.38 var(--font); text-align: center; color: #e9ecf3; }
+.cap .w { transition: none; }
+.tick { color: var(--green); }
+svg text { font-family: var(--mono); }

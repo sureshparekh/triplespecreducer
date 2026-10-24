@@ -1,0 +1,157 @@
+/* code colours: GitHub light and dark */
+.highlight { background: transparent; } .highlight .hll { background: var(--accent-tint); }
+:root .highlight .k { color: #cf222e; }
+:root .highlight .kc { color: #0550ae; }
+:root .highlight .kd { color: #cf222e; }
+:root .highlight .kn { color: #cf222e; }
+:root .highlight .kp { color: #cf222e; }
+:root .highlight .kr { color: #cf222e; }
+:root .highlight .kt { color: #cf222e; }
+:root .highlight .s { color: #0a3069; }
+:root .highlight .s1 { color: #0a3069; }
+:root .highlight .s2 { color: #0a3069; }
+:root .highlight .sa { color: #0a3069; }
+:root .highlight .sb { color: #0a3069; }
+:root .highlight .sd { color: #0a3069; }
+:root .highlight .se { color: #0a3069; }
+:root .highlight .si { color: #0a3069; }
+:root .highlight .sh { color: #0a3069; }
+:root .highlight .ss { color: #0a3069; }
+:root .highlight .c { color: #6e7781; font-style: italic; }
+:root .highlight .c1 { color: #6e7781; font-style: italic; }
+:root .highlight .cm { color: #6e7781; font-style: italic; }
+:root .highlight .cs { color: #6e7781; font-style: italic; }
+:root .highlight .ch { color: #6e7781; font-style: italic; }
+:root .highlight .cp { color: #6e7781; }
+:root .highlight .m { color: #0550ae; }
+:root .highlight .mi { color: #0550ae; }
+:root .highlight .mf { color: #0550ae; }
+:root .highlight .mh { color: #0550ae; }
+:root .highlight .mo { color: #0550ae; }
+:root .highlight .il { color: #0550ae; }
+:root .highlight .nf { color: #8250df; }
+:root .highlight .fm { color: #8250df; }
+:root .highlight .nc { color: #953800; }
+:root .highlight .nb { color: #0550ae; }
+:root .highlight .bp { color: #0550ae; }
+:root .highlight .nd { color: #8250df; }
+:root .highlight .nn { color: #953800; }
+:root .highlight .ne { color: #953800; }
+:root .highlight .o { color: #cf222e; }
+:root .highlight .ow { color: #cf222e; }
+:root .highlight .nv { color: #953800; }
+:root .highlight .vm { color: #953800; }
+:root .highlight .na { color: #0550ae; }
+:root .highlight .nt { color: #116329; }
+:root .highlight .gp { color: #6e7781; }
+:root .highlight .go { color: #52514e; }
+:root .highlight .err { color: #82071e; }
+:root .highlight .gh { color: #0550ae; }
+:root .highlight .gu { color: #0550ae; }
+:root .highlight .gd { color: #82071e; }
+:root .highlight .gi { color: #116329; }
+:root .highlight .nl { color: #953800; }
+:root[data-theme="dark"] .highlight .k { color: #ff7b72; }
+:root[data-theme="dark"] .highlight .kc { color: #79c0ff; }
+:root[data-theme="dark"] .highlight .kd { color: #ff7b72; }
+:root[data-theme="dark"] .highlight .kn { color: #ff7b72; }
+:root[data-theme="dark"] .highlight .kp { color: #ff7b72; }
+:root[data-theme="dark"] .highlight .kr { color: #ff7b72; }
+:root[data-theme="dark"] .highlight .kt { color: #ff7b72; }
+:root[data-theme="dark"] .highlight .s { color: #a5d6ff; }
+:root[data-theme="dark"] .highlight .s1 { color: #a5d6ff; }
+:root[data-theme="dark"] .highlight .s2 { color: #a5d6ff; }
+:root[data-theme="dark"] .highlight .sa { color: #a5d6ff; }
+:root[data-theme="dark"] .highlight .sb { color: #a5d6ff; }
+:root[data-theme="dark"] .highlight .sd { color: #a5d6ff; }
+:root[data-theme="dark"] .highlight .se { color: #a5d6ff; }
+:root[data-theme="dark"] .highlight .si { color: #a5d6ff; }
+:root[data-theme="dark"] .highlight .sh { color: #a5d6ff; }
+:root[data-theme="dark"] .highlight .ss { color: #a5d6ff; }
+:root[data-theme="dark"] .highlight .c { color: #8b949e; font-style: italic; }
+:root[data-theme="dark"] .highlight .c1 { color: #8b949e; font-style: italic; }
+:root[data-theme="dark"] .highlight .cm { color: #8b949e; font-style: italic; }
+:root[data-theme="dark"] .highlight .cs { color: #8b949e; font-style: italic; }
+:root[data-theme="dark"] .highlight .ch { color: #8b949e; font-style: italic; }
+:root[data-theme="dark"] .highlight .cp { color: #8b949e; }
+:root[data-theme="dark"] .highlight .m { color: #79c0ff; }
+:root[data-theme="dark"] .highlight .mi { color: #79c0ff; }
+:root[data-theme="dark"] .highlight .mf { color: #79c0ff; }
+:root[data-theme="dark"] .highlight .mh { color: #79c0ff; }
+:root[data-theme="dark"] .highlight .mo { color: #79c0ff; }
+:root[data-theme="dark"] .highlight .il { color: #79c0ff; }
+:root[data-theme="dark"] .highlight .nf { color: #d2a8ff; }
+:root[data-theme="dark"] .highlight .fm { color: #d2a8ff; }
+:root[data-theme="dark"] .highlight .nc { color: #ffa657; }
+:root[data-theme="dark"] .highlight .nb { color: #79c0ff; }
+:root[data-theme="dark"] .highlight .bp { color: #79c0ff; }
+:root[data-theme="dark"] .highlight .nd { color: #d2a8ff; }
+:root[data-theme="dark"] .highlight .nn { color: #ffa657; }
+:root[data-theme="dark"] .highlight .ne { color: #ffa657; }
+:root[data-theme="dark"] .highlight .o { color: #ff7b72; }
+:root[data-theme="dark"] .highlight .ow { color: #ff7b72; }
+:root[data-theme="dark"] .highlight .nv { color: #ffa657; }
+:root[data-theme="dark"] .highlight .vm { color: #ffa657; }
+:root[data-theme="dark"] .highlight .na { color: #79c0ff; }
+:root[data-theme="dark"] .highlight .nt { color: #7ee787; }
+:root[data-theme="dark"] .highlight .gp { color: #8b949e; }
+:root[data-theme="dark"] .highlight .go { color: #c3c2b7; }
+:root[data-theme="dark"] .highlight .err { color: #ffa198; }
+:root[data-theme="dark"] .highlight .gh { color: #79c0ff; }
+:root[data-theme="dark"] .highlight .gu { color: #79c0ff; }
+:root[data-theme="dark"] .highlight .gd { color: #ffa198; }
+:root[data-theme="dark"] .highlight .gi { color: #7ee787; }
+:root[data-theme="dark"] .highlight .nl { color: #ffa657; }
+@media (prefers-color-scheme: dark) {
+:root:not([data-theme="light"]) .highlight .k { color: #ff7b72; }
+:root:not([data-theme="light"]) .highlight .kc { color: #79c0ff; }
+:root:not([data-theme="light"]) .highlight .kd { color: #ff7b72; }
+:root:not([data-theme="light"]) .highlight .kn { color: #ff7b72; }
+:root:not([data-theme="light"]) .highlight .kp { color: #ff7b72; }
+:root:not([data-theme="light"]) .highlight .kr { color: #ff7b72; }
+:root:not([data-theme="light"]) .highlight .kt { color: #ff7b72; }
+:root:not([data-theme="light"]) .highlight .s { color: #a5d6ff; }
+:root:not([data-theme="light"]) .highlight .s1 { color: #a5d6ff; }
+:root:not([data-theme="light"]) .highlight .s2 { color: #a5d6ff; }
+:root:not([data-theme="light"]) .highlight .sa { color: #a5d6ff; }
+:root:not([data-theme="light"]) .highlight .sb { color: #a5d6ff; }
+:root:not([data-theme="light"]) .highlight .sd { color: #a5d6ff; }
+:root:not([data-theme="light"]) .highlight .se { color: #a5d6ff; }
+:root:not([data-theme="light"]) .highlight .si { color: #a5d6ff; }
+:root:not([data-theme="light"]) .highlight .sh { color: #a5d6ff; }
+:root:not([data-theme="light"]) .highlight .ss { color: #a5d6ff; }
+:root:not([data-theme="light"]) .highlight .c { color: #8b949e; font-style: italic; }
+:root:not([data-theme="light"]) .highlight .c1 { color: #8b949e; font-style: italic; }
+:root:not([data-theme="light"]) .highlight .cm { color: #8b949e; font-style: italic; }
+:root:not([data-theme="light"]) .highlight .cs { color: #8b949e; font-style: italic; }
+:root:not([data-theme="light"]) .highlight .ch { color: #8b949e; font-style: italic; }
+:root:not([data-theme="light"]) .highlight .cp { color: #8b949e; }
+:root:not([data-theme="light"]) .highlight .m { color: #79c0ff; }
+:root:not([data-theme="light"]) .highlight .mi { color: #79c0ff; }
+:root:not([data-theme="light"]) .highlight .mf { color: #79c0ff; }
+:root:not([data-theme="light"]) .highlight .mh { color: #79c0ff; }
+:root:not([data-theme="light"]) .highlight .mo { color: #79c0ff; }
+:root:not([data-theme="light"]) .highlight .il { color: #79c0ff; }
+:root:not([data-theme="light"]) .highlight .nf { color: #d2a8ff; }
+:root:not([data-theme="light"]) .highlight .fm { color: #d2a8ff; }
+:root:not([data-theme="light"]) .highlight .nc { color: #ffa657; }
+:root:not([data-theme="light"]) .highlight .nb { color: #79c0ff; }
+:root:not([data-theme="light"]) .highlight .bp { color: #79c0ff; }
+:root:not([data-theme="light"]) .highlight .nd { color: #d2a8ff; }
+:root:not([data-theme="light"]) .highlight .nn { color: #ffa657; }
+:root:not([data-theme="light"]) .highlight .ne { color: #ffa657; }
+:root:not([data-theme="light"]) .highlight .o { color: #ff7b72; }
+:root:not([data-theme="light"]) .highlight .ow { color: #ff7b72; }
+:root:not([data-theme="light"]) .highlight .nv { color: #ffa657; }
+:root:not([data-theme="light"]) .highlight .vm { color: #ffa657; }
+:root:not([data-theme="light"]) .highlight .na { color: #79c0ff; }
+:root:not([data-theme="light"]) .highlight .nt { color: #7ee787; }
+:root:not([data-theme="light"]) .highlight .gp { color: #8b949e; }
+:root:not([data-theme="light"]) .highlight .go { color: #c3c2b7; }
+:root:not([data-theme="light"]) .highlight .err { color: #ffa198; }
+:root:not([data-theme="light"]) .highlight .gh { color: #79c0ff; }
+:root:not([data-theme="light"]) .highlight .gu { color: #79c0ff; }
+:root:not([data-theme="light"]) .highlight .gd { color: #ffa198; }
+:root:not([data-theme="light"]) .highlight .gi { color: #7ee787; }
+:root:not([data-theme="light"]) .highlight .nl { color: #ffa657; }
+}

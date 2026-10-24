@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "triplespec-reducer"
+version = "1.0.0"
+description = "SOAR TripleSpec 4.1 near-infrared spectra reduced exactly as Spextool (TS4_SOAR) reduces them, in a desktop application that explains every step"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Suresh Parekh", email = "suresh.parekh@ufrgs.br" }]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "astropy>=5.3",
+    "matplotlib>=3.7",
+    "PySide6>=6.5",
+    "numba>=0.58",
+    "astroquery>=0.4.7",
+]
+
+[project.urls]
+Homepage = "https://github.com/sureshparekh/triplespecreducer"
+Documentation = "https://sureshparekh.github.io/triplespecreducer/"
+Source = "https://github.com/sureshparekh/triplespecreducer"
+
+[project.optional-dependencies]
+docs = ["sphinx>=7", "myst-parser>=2", "sphinx-copybutton", "sphinx-design"]
+test = ["pytest>=7"]
+
+[project.scripts]
+triplespec-reducer = "triplespec_reducer.cli:main"
+tsr = "triplespec_reducer.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["triplespec_reducer*"]
+
+[tool.setuptools.package-data]
+triplespec_reducer = ["data/instrument/*", "data/spextool/*", "data/fonts/*", "data/icons/*", "data/logo/*"]

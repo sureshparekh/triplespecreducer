@@ -1,0 +1,157 @@
+{#- TripleSpec Reducer documentation theme (after BRAIN's): a top bar of sections, the section's pages on
+    the left, the page in the middle, its contents on the right. The
+    navigation (nav, tab, group, crumbs, prev_page, next_page) comes from
+    tsr_ext.py, which reads NAV in conf.py. -#}
+{%- extends "basic/layout.html" %}
+
+{%- block htmltitle %}
+<title>{% if pagename != master_doc %}{{ title|striptags|e }} · {% endif %}TripleSpec Reducer documentation</title>
+{%- endblock %}
+
+{%- block extrahead %}
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<script>
+  /* the theme before the first paint: the reader's choice, else the system */
+  (function () {
+    try {
+      var t = localStorage.getItem("tsr-theme");
+      if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+    } catch (e) {}
+  })();
+</script>
+<link rel="icon" type="image/png" href="{{ pathto('_static/logo/app_icon_round_64.png', 1) }}">
+{%- endblock %}
+
+{%- block relbar1 %}{% endblock %}
+{%- block relbar2 %}{% endblock %}
+
+{%- block header %}
+<a class="skip" href="#main">Skip to the content</a>
+<header class="topbar">
+  <div class="topbar-left">
+    <button class="icon-btn nav-toggle" type="button" aria-label="Menu" aria-expanded="false" data-nav-toggle>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 9.5l5.5 5.5 5.5-5.5"/></svg>
+    </button>
+    <a class="brand" href="{{ pathto(master_doc) }}">
+      <img class="brand-logo" src="{{ pathto('_static/logo/app_icon_round_64.png', 1) }}" alt="" width="34" height="34">
+      <span class="brand-name">TripleSpec Reducer</span>
+      <span class="brand-docs">Docs</span>
+    </a>
+  </div>
+  <nav class="tabs" aria-label="Sections">
+    {%- for t in nav %}
+    <a class="tab{% if tab and t.slug == tab.slug %} is-active{% endif %}" href="{{ pathto(t.index) }}">{{ t.title }}</a>
+    {%- endfor %}
+  </nav>
+  <div class="topbar-right">
+    <button class="search-btn" type="button" data-search-open aria-label="Search the documentation">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>
+      <span class="search-label">Search</span>
+      <kbd>Ctrl</kbd><kbd>K</kbd>
+    </button>
+    <button class="icon-btn theme-btn" type="button" data-theme-toggle aria-label="Colour theme: follows the system">
+      <svg class="i-system" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="12" rx="2"/><path d="M8.5 20h7M12 16.5V20"/></svg>
+      <svg class="i-light" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/></svg>
+      <svg class="i-dark" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>
+    </button>
+    <a class="gh-btn" href="https://github.com/sureshparekh/triplespecreducer" aria-label="TripleSpec Reducer on GitHub">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5a9.5 9.5 0 0 0-3 18.5c.5.1.7-.2.7-.5v-1.7c-2.6.6-3.2-1.2-3.2-1.2-.4-1.1-1-1.4-1-1.4-.9-.6 0-.6 0-.6 1 .1 1.5 1 1.5 1 .9 1.5 2.3 1.1 2.9.8.1-.6.3-1.1.6-1.3-2.1-.2-4.3-1-4.3-4.6 0-1 .4-1.9 1-2.5-.1-.3-.4-1.2.1-2.5 0 0 .8-.3 2.6 1a9 9 0 0 1 4.7 0c1.8-1.3 2.6-1 2.6-1 .5 1.3.2 2.2.1 2.5.6.7 1 1.5 1 2.5 0 3.6-2.2 4.4-4.3 4.6.3.3.6.9.6 1.8v2.6c0 .3.2.6.7.5A9.5 9.5 0 0 0 12 2.5z"/></svg>
+    </a>
+  </div>
+</header>
+{%- endblock %}
+
+{%- block content %}
+{%- if is_home %}
+<aside class="sidebar sidebar-home" data-sidebar aria-label="Sections">
+  <nav>
+    <div class="nav-group">
+      <p class="nav-group-title">Sections</p>
+      <ul>
+        {%- for t in nav %}
+        <li><a class="nav-link" href="{{ pathto(t.index) }}">{{ t.title }}</a></li>
+        {%- endfor %}
+      </ul>
+    </div>
+  </nav>
+</aside>
+<div class="scrim" data-nav-close></div>
+<main id="main" class="home">
+  {{ body }}
+</main>
+{%- else %}
+<div class="frame">
+  <aside class="sidebar" data-sidebar aria-label="Pages of this section">
+    <nav>
+      <div class="sidebar-tabs">
+        {%- for t in nav %}
+        <a class="sidebar-tab{% if tab and t.slug == tab.slug %} is-active{% endif %}" href="{{ pathto(t.index) }}">{{ t.title }}</a>
+        {%- endfor %}
+      </div>
+      {%- if tab %}
+      {%- for g in tab.groups %}
+      <div class="nav-group">
+        <p class="nav-group-title">{{ g.title }}</p>
+        <ul>
+          {%- for p in g.pages %}
+          <li><a class="nav-link{% if p.doc == active_doc %} is-active{% endif %}" href="{{ pathto(p.doc) }}"{% if p.doc == pagename %} aria-current="page"{% endif %}>{{ p.title }}</a></li>
+          {%- endfor %}
+        </ul>
+      </div>
+      {%- endfor %}
+      {%- endif %}
+    </nav>
+  </aside>
+  <div class="scrim" data-nav-close></div>
+  <main id="main" class="page">
+    <article class="article">
+      {%- if crumbs %}
+      <nav class="crumbs" aria-label="Breadcrumb">
+        {%- for c in crumbs %}
+        {%- if c.doc %}<a href="{{ pathto(c.doc) }}">{{ c.title }}</a>{% else %}<span>{{ c.title }}</span>{% endif %}
+        {%- if not loop.last %}<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>{% endif %}
+        {%- endfor %}
+      </nav>
+      {%- endif %}
+      <div class="body" role="main">
+        {{ body }}
+      </div>
+      <nav class="pager" aria-label="Previous and next page">
+        {%- if prev_page %}
+        <a class="pager-link prev" href="{{ pathto(prev_page.doc) }}"><span class="pager-dir">← Previous</span><span class="pager-title">{{ prev_page.title }}</span></a>
+        {%- else %}<span></span>{%- endif %}
+        {%- if next_page %}
+        <a class="pager-link next" href="{{ pathto(next_page.doc) }}"><span class="pager-dir">Next →</span><span class="pager-title">{{ next_page.title }}</span></a>
+        {%- endif %}
+      </nav>
+      <footer class="page-foot">
+        <p>TripleSpec Reducer · Suresh Parekh, UFRGS (<a href="https://www.if.ufrgs.br/~riffel/saffary/index.html">SAFFARY group</a>) · Last built {{ last_updated or "" }}</p>
+      </footer>
+    </article>
+    <aside class="onpage" aria-label="On this page">
+      <p class="onpage-title">On this page</p>
+      <ul data-onpage></ul>
+    </aside>
+  </main>
+</div>
+{%- endif %}
+
+<div class="search-modal" data-search-modal hidden>
+  <div class="search-backdrop" data-search-close></div>
+  <div class="search-panel" role="dialog" aria-label="Search">
+    <div class="search-field">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></svg>
+      <input type="search" placeholder="Search the documentation" autocomplete="off" spellcheck="false" data-search-input>
+      <kbd>Esc</kbd>
+    </div>
+    <ul class="search-results" data-search-results></ul>
+    <p class="search-hint" data-search-hint>Type to search page titles, section headings and words.</p>
+  </div>
+</div>
+<script>window.TSR_TABS = { {%- for t in nav %}"{{ t.prefixes[0] }}": "{{ t.title }}"{% if not loop.last %}, {% endif %}{%- endfor %} };</script>
+<script>window.TSR_ROOT = "{{ pathto('', 1) }}"; window.TSR_SEARCH_INDEX = "{{ pathto('searchindex.js', 1) }}"; window.TSR_SEARCH_PAGE = "{{ pathto('search') }}";</script>
+<script src="{{ pathto('_static/tsr.js', 1) }}?v={{ tsr_js_version }}" defer></script>
+{%- endblock %}
+
+{%- block footer %}{%- endblock %}

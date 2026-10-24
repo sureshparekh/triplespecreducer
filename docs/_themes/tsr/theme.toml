@@ -1,0 +1,7 @@
+[theme]
+inherit = "basic"
+stylesheets = ["fonts/fonts.css", "tsr.css", "pygments-tsr.css"]
+pygments_style = { default = "default" }
+sidebars = []
+
+[options]

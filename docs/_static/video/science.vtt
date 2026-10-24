@@ -1,0 +1,106 @@
+WEBVTT
+
+00:00:00.940 --> 00:00:09.949
+TripleSpec Reducer turns a night of near-infrared spectra from the SOAR TripleSpec spectrograph into calibrated, telluric-corrected spectra.
+
+00:00:09.969 --> 00:00:19.599
+In this film we follow the light, from the telescope to the final spectrum, and see what each step of the reduction does, why it is needed, and how the program does it.
+
+00:00:21.759 --> 00:00:37.252
+The reduction follows the steps and the science of Spextool, the package Michael Cushing, William Vacca and John Rayner wrote for NASA's Infrared Telescope Facility, with the telluric correction method they published in 2003, and its module for TripleSpec.
+
+00:00:37.333 --> 00:00:44.699
+Run on the same frames, the program's results and those of the IDL tool are identical, bit for bit.
+
+00:00:46.879 --> 00:00:52.320
+TripleSpec is a cross-dispersed spectrograph on the four point one metre SOAR telescope.
+
+00:00:52.360 --> 00:01:11.985
+Light from a slit, thirty-eight arcseconds long, is spread out by a grating, and a prism separates the grating's orders. So one exposure holds five spectra, one above the other: orders three to seven, from zero point nine four to two point four seven microns, at a resolving power of about three and a half thousand.
+
+00:01:14.145 --> 00:01:25.499
+This is a real frame. Each curved strip is one order, the image of the slit spread out in wavelength, and inside each strip the star appears twice, at the two positions it was observed in.
+
+00:01:27.659 --> 00:01:33.563
+Two things stand between the detector and the spectrum we want. The first is the atmosphere.
+
+00:01:33.583 --> 00:01:46.053
+Water vapour and carbon dioxide absorb much of the near infrared: between the bands almost nothing gets through, and inside them hundreds of narrow lines remain, changing with the airmass and the humidity.
+
+00:01:48.253 --> 00:01:59.400
+The second is the sky's own glow. Hydroxyl molecules high in the atmosphere emit bright, narrow lines, far brighter than a faint galaxy, and they change from minute to minute.
+
+00:01:59.400 --> 00:02:05.884
+Those same lines, though, are at wavelengths known to a fraction of an angstrom, and they will calibrate our wavelengths.
+
+00:02:08.104 --> 00:02:17.049
+The sky is removed by nodding. The telescope observes the target at one position, A, then moves it to another, B, and the two frames are subtracted.
+
+00:02:16.929 --> 00:02:32.279
+Everything that is the same in both, the sky lines, the telescope's warm glow, the detector's dark current, cancels. A star nodded along the slit appears twice, once positive and once negative; a galaxy is nodded off, to blank sky, and appears once.
+
+00:02:34.499 --> 00:02:47.124
+So a night holds four kinds of frames: lamp flats, arc lamps, the science targets in their A and B positions, and A0 V standard stars, observed close in time and airmass to every target.
+
+00:02:47.084 --> 00:02:56.007
+The program reads every header, sorts the frames, pairs them, and proposes the whole plan in one table, where every decision can be checked and changed.
+
+00:02:58.147 --> 00:03:07.137
+The first calibration is the flat field. A lamp lights the slit evenly; the lamp-off frames, which hold only the thermal glow, are subtracted.
+
+00:03:07.077 --> 00:03:19.310
+The edges of the five orders are traced, and each order is divided by a smooth model of itself, leaving only the pixel-to-pixel sensitivity of the detector, close to one, which every frame is divided by.
+
+00:03:21.550 --> 00:03:37.338
+Next, the wavelengths. A sky spectrum is extracted from each order and cross-correlated with a template; the hydroxyl lines are identified, and one polynomial in column and order number is fitted to all of them, with an RMS of about a third of an angstrom.
+
+00:03:37.298 --> 00:03:46.382
+Then each line is followed along the slit, to map how the slit's image is tilted. The result is a wavelength, and a slit position, for every pixel.
+
+00:03:48.562 --> 00:03:55.329
+Now extraction. For every pair, B is subtracted from A and the result divided by the flat.
+
+00:03:55.410 --> 00:04:08.505
+A spatial profile shows where the light falls along the slit. Apertures are placed on the target, the light left between them is fitted as background and removed, and the flux inside each aperture is summed, at every wavelength.
+
+00:04:10.665 --> 00:04:18.408
+The spectra of one target are then combined. They are first scaled to a common level, because the seeing and the guiding change during a sequence.
+
+00:04:18.508 --> 00:04:28.251
+Then, at every wavelength, a robust weighted mean rejects the outliers and weights the rest by their errors. The signal to noise grows as the square root of the number of spectra.
+
+00:04:30.411 --> 00:04:39.540
+The telluric correction is the heart of the reduction. What we recorded of the galaxy is its true spectrum, times the atmosphere, times the instrument.
+
+00:04:39.460 --> 00:04:52.452
+An A0 V star went through the same atmosphere and instrument minutes earlier, and its true spectrum is known: it looks like Vega's, which has been modelled in detail. So the model divided by the observed star is exactly the correction.
+
+00:04:54.612 --> 00:05:02.376
+The catch is the star's own deep hydrogen lines. Vega's model lines must first match them exactly, as TripleSpec saw them.
+
+00:05:02.396 --> 00:05:15.603
+Vega is shifted to the star's velocity, and a convolution kernel is found by dividing the Fourier transforms of the two lines. Convolved with that kernel, Vega's line lies on the star's, to within a percent or two.
+
+00:05:17.763 --> 00:05:27.549
+With the kernel, Vega's model is rebuilt for every order, scaled to the star's magnitude, and divided by the observed star: the telluric spectrum.
+
+00:05:27.609 --> 00:05:38.795
+Slid by a fraction of a pixel to line up with the galaxy's features, it multiplies the galaxy's spectrum, removing the atmosphere and giving it physical flux units at once.
+
+00:05:41.035 --> 00:05:51.903
+Last, the five orders are merged. They overlap at their ends, and are joined one by one, the overlaps averaged with weights from their errors, into one continuous spectrum.
+
+00:05:54.124 --> 00:06:02.713
+Every file is named after its source and its step, in Spextool's own format, and every step keeps a log of its settings and its results.
+
+00:06:02.774 --> 00:06:08.620
+The whole night can be reduced with one button, or step by step, with every step explaining itself.
+
+00:06:10.880 --> 00:06:26.645
+Every product was compared with the IDL tool's on the same frames: the flat, the wavelength solution, every extracted spectrum, the combined, corrected and merged spectra, even every number in every header. They are identical, bit for bit.
+
+00:06:26.605 --> 00:06:34.867
+The one exception is the telluric kernel, made with IDL's own Fourier transform, which agrees to a few parts in a million.
+
+00:06:34.727 --> 00:06:40.449
+The documentation has the tutorial, the science of every step, and every source it rests on.
