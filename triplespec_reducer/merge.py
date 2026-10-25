@@ -1,11 +1,12 @@
 """
 Joining the orders into one spectrum: XMERGEORDERS.
 
-An anchor order is chosen, then each neighbouring order is added in turn:
-scaled (1 unless the user sets a factor or asks for XMERGEORDERS_AUTOSCALE
-over a region of the overlap), optionally trimmed at one end, and merged
-with MC_MERGESPEC, which takes the error-weighted mean where the two
-overlap and leaves a NaN pair at a gap between orders that do not.
+An anchor order is chosen, then each neighbouring order (addable_orders)
+is added in turn: scaled (1 unless the user sets a factor or asks for
+XMERGEORDERS_AUTOSCALE over a region of the overlap), optionally cut (the
+order being added, the merged spectrum, or both), and merged with
+MC_MERGESPEC, which takes the error-weighted mean where the two overlap
+and leaves a NaN pair at a gap between orders that do not.
 """
 
 import numpy as np
@@ -21,7 +22,10 @@ def nantrim(array, flag):
 
 
 def mergespec(w1, f1, w2, f2, e1, e2, bf1, bf2, sum_=False):
-    """MC_MERGESPEC (with errors and flags, as XMERGEORDERS calls it)."""
+    """
+    MC_MERGESPEC (with errors and flags, as XMERGEORDERS calls it). `sum_`
+    is its /SUM, which XMERGEORDERS cannot reach (see merge_orders).
+    """
     # XMERGEORDERS passes DOUBLE(flux) and DOUBLE(error); the wavelengths
     # keep their own type.
     w1, w2 = np.asarray(w1), np.asarray(w2)
@@ -92,7 +96,11 @@ def mergespec(w1, f1, w2, f2, e1, e2, bf1, bf2, sum_=False):
     z = np.where(nw1 > max2)[0]
     rw, rf, re, rb = nw1[z], nf1[z], ne1[z], nbf1[z]
     z = (nw2 > min1) & (nw2 < max1)
-    nnf2, nne2 = interpspec(nw2[z], nf2[z], nw1, iyerror=ne2[z], leavenans=True)
+    # MC_MERGESPEC passes IYERROR=ne2, the whole error array, with the
+    # x and y of the overlap only (nw2[z], nf2[z]); MC_INTERPSPEC takes the
+    # errors at the same subscripts as x (iyerror[zci]), so the errors used
+    # are the first ones of ne2, not those of the overlap.
+    nnf2, nne2 = interpspec(nw2[z], nf2[z], nw1, iyerror=ne2[:int(z.sum())], leavenans=True)
     mf, mv = combine_overlap(nnf2, nne2)
     nnbf2 = combflagstack([nbf1, interpflagspec(nw2[z], nbf2[z], nw1)])
     idx = nantrim(mf, 2)
@@ -106,6 +114,11 @@ def autoscale(blue, green, wrange):
     """
     XMERGEORDERS_AUTOSCALE: the error-weighted scale of green to blue in
     wrange, with IDL's TOTALs; returned as the FLOAT scale field holds it.
+
+    XMERGEORDERS_AUTOSCALE first sets the scale to 1 and calls
+    XMERGEORDERS_CUTSCALESPEC with no trim, so `blue` must be the whole
+    merged spectrum and `green` the whole (unscaled) order being added;
+    merge_orders passes them so.
     """
     wrange = np.sort(np.asarray(wrange, dtype=np.float32))
     zb = (blue[0] > wrange[0]) & (blue[0] < wrange[1])
@@ -120,24 +133,125 @@ def autoscale(blue, green, wrange):
     return np.float32(tot(num) / tot(den))
 
 
-def merge_orders(spec, orders, naps=1, aperture=1, anchor=None, sequence=None,
-                 scales=None, trims=None, weighted=True, sum_=False, regions=None):
+def addable_orders(orders, merged):
     """
-    XMERGEORDERS from start to finish.
+    XMERGEORDERS_MODADDORDER: the orders the 'Add Order' list offers next,
+    the one below and the one above the merged block in the file's order
+    list ([min-1, max+1] of their positions, kept when inside the list).
+    Empty when every order is merged ('Merging complete').
+    """
+    orders = list(orders)
+    if len(set(merged)) >= len(orders):
+        return []
+    pos = [orders.index(o) for o in merged]
+    possible = [min(pos) - 1, max(pos) + 1]
+    return [orders[k] for k in possible if 0 <= k <= len(orders) - 1]
 
-    `sequence` is the order in which orders are added (by default outward
-    from the anchor, lower first, as the add-order list offers them);
-    `scales[o]` multiplies order o before it is merged (default 1) and may
-    be 'auto', scaled over regions[o] = (w0, w1); `trims[o]` is
-    ('Green'|'Blue', 'Left'|'Right', wavelength): which spectrum is cut
-    and which side of the wavelength is kept, as XMERGEORDERS_CUTSCALESPEC. Returns
-    [4, npix] (wave, flux, error, flag) and the scales used.
+
+def default_sequence(orders, anchor):
     """
+    The add order this library uses when none is given: outward from the
+    anchor, the next position up first, then the next one down, so every
+    order added is one addable_orders offers.
+    """
+    orders = list(orders)
+    seq = []
+    lo = hi = orders.index(anchor)
+    while len(seq) < len(orders) - 1:
+        if hi + 1 < len(orders):
+            hi += 1
+            seq.append(orders[hi])
+        if lo - 1 >= 0:
+            lo -= 1
+            seq.append(orders[lo])
+    return seq
+
+
+def overlap_region(blue, green):
+    """
+    A region for XMERGEORDERS_AUTOSCALE: the whole wavelength overlap of the
+    merged spectrum and the order being added (FLOAT, as the cursor gives
+    it). XMERGEORDERS has no default region -- the user selects one with
+    's' -- so this is only a choice a user could make there by hand; the
+    pipeline uses it when it is asked for (regions[o] = 'overlap').
+    """
+    lo = max(np.nanmin(blue[0]), np.nanmin(green[0]))
+    hi = min(np.nanmax(blue[0]), np.nanmax(green[0]))
+    if not lo < hi:
+        raise ValueError("the order does not overlap the merged spectrum: no region to scale over")
+    return np.float32(lo), np.float32(hi)
+
+
+TRIM_SPECTRA = ("Green", "Blue")
+TRIM_SIDES = ("Right", "Left")
+
+
+def _trim_list(t):
+    """trims[o] as a list of (spectrum, side, wavelength) cuts."""
+    if not t:
+        return []
+    if isinstance(t[0], str):          # a single (spectrum, side, wavelength)
+        t = [t]
+    out = []
+    for which, side, w in t:
+        which, side = str(which).capitalize(), str(side).capitalize()
+        if which not in TRIM_SPECTRA or side not in TRIM_SIDES:
+            raise ValueError(f"trim {which!r}/{side!r}: the spectrum is Green or Blue, the side Right or Left")
+        out.append((which, side, w))
+    return out
+
+
+def merge_orders(spec, orders, naps=1, aperture=1, anchor=None, sequence=None,
+                 scales=None, trims=None, regions=None, check_adjacent=True,
+                 nonidl_unweighted=False, nonidl_sum_flux=False,
+                 weighted=None, sum_=None):
+    """
+    XMERGEORDERS from start to finish, for one aperture.
+
+    `sequence` is the order in which orders are added (by default
+    default_sequence: outward from the anchor); with `check_adjacent` each
+    one must be an order the 'Add Order' list would offer at that point
+    (addable_orders), as XMERGEORDERS allows no other.
+
+    `scales[o]` multiplies order o before it is merged (default 1, the
+    'Scale' field) and may be 'auto': XMERGEORDERS_AUTOSCALE over
+    `regions[o]`, a (w0, w1) region (the 's' selection) or 'overlap'
+    (overlap_region). The scale is found, as XMERGEORDERS finds it, on the
+    untrimmed merged spectrum and the untrimmed order. 'auto' without a
+    region is refused, as XMERGEORDERS refuses it ("Please select a region
+    using 's'.").
+
+    `trims[o]` is one ('Green'|'Blue', 'Right'|'Left', wavelength) cut or a
+    list of them, XMERGEORDERS_CUTSCALESPEC: 'Green' cuts the order being
+    added, 'Blue' the merged spectrum, 'Right' keeps what lies below the
+    wavelength, 'Left' what lies above. A green cut and a blue cut are kept
+    together; a later cut of the same spectrum replaces the earlier one (it
+    is made from the uncut spectrum again). They act after the scale, as in
+    XMERGEORDERS, where a new scale (typed or automatic) cancels the cuts.
+
+    Two choices do not exist in XMERGEORDERS 4.1 and are off by default:
+    `nonidl_unweighted` (its 'Weighted Mean' unticked: errors set to 1,
+    plain mean) and `nonidl_sum_flux` (its 'Sum Flux': fluxes added, the
+    variances added). In XMERGEORDERS both stop with an undefined variable
+    (XMERGEORDERS_COMBINESPEC uses BSPEC_E, which exists only when weighted),
+    so they produce no merged spectrum there; here they give results with
+    no Spextool counterpart. `weighted` and `sum_` are their older names
+    (weighted=False is nonidl_unweighted=True, sum_=True is
+    nonidl_sum_flux=True).
+
+    Returns [4, npix] (wave, flux, error, flag), the scales used and the
+    merged orders in the order they were added.
+    """
+    if weighted is not None:
+        nonidl_unweighted = nonidl_unweighted or not weighted
+    if sum_ is not None:
+        nonidl_sum_flux = nonidl_sum_flux or bool(sum_)
+    unweighted = nonidl_unweighted or nonidl_sum_flux      # 'Sum Flux' unticks 'Weighted Mean'
     # MC_READSPEC keeps the stored type (FLOAT for a corrected spectrum),
     # MC_CAASPECFLAGS adds the flag column.
     from triplespec_reducer.extract import caaspecflags
     spec = caaspecflags(np.asarray(spec)).copy()
-    if not weighted:
+    if unweighted:
         spec[:, 2, :] = 1.
     orders = list(orders)
     anchor = orders[0] if anchor is None else anchor
@@ -147,26 +261,36 @@ def merge_orders(spec, orders, naps=1, aperture=1, anchor=None, sequence=None,
     done = [anchor]
     used = {o: 1.0 for o in orders}
     if sequence is None:
-        sequence = []
-        lo = hi = orders.index(anchor)
-        while len(sequence) < len(orders) - 1:
-            if hi + 1 < len(orders):
-                hi += 1
-                sequence.append(orders[hi])
-            if lo - 1 >= 0:
-                lo -= 1
-                sequence.append(orders[lo])
+        sequence = default_sequence(orders, anchor)
     scales = scales or {}
     trims = trims or {}
+    regions = regions or {}
     for o in sequence:
+        if check_adjacent and o not in addable_orders(orders, done):
+            raise ValueError(f"order {o} cannot be added after {done}: XMERGEORDERS offers only "
+                             f"{addable_orders(orders, done)}")
         k = orders.index(o) * naps + (aperture - 1)
         nn = np.isfinite(spec[k, 1])
         add = spec[k][:, nn]
+        sc = scales.get(o, 1.0)
+        if isinstance(sc, str):
+            if sc != "auto":
+                raise ValueError(f"scale {sc!r} for order {o}: a number or 'auto'")
+            reg = regions.get(o)
+            if reg is None:
+                raise ValueError(f"auto scale for order {o} needs a region (regions[{o}] = (w0, w1) "
+                                 "or 'overlap'): XMERGEORDERS asks 'Please select a region using 's'.'")
+            if isinstance(reg, str):
+                if reg != "overlap":
+                    raise ValueError(f"region {reg!r} for order {o}: (w0, w1) or 'overlap'")
+                reg = overlap_region(merged, add)
+            # XMERGEORDERS_AUTOSCALE: scale 1, no trim, so the whole merged
+            # spectrum and the whole order
+            sc = autoscale(merged, add.copy(), reg)
+        sc = np.float32(sc)                       # the FLOAT scale field
         blue = merged
         green = add.copy()
-        t = trims.get(o)
-        if t:
-            which, side, w = t
+        for which, side, w in _trim_list(trims.get(o)):
             w = np.float32(w)                     # the FLOAT trim field
             if which == "Green":
                 z = add[0] < w if side == "Right" else add[0] > w
@@ -175,19 +299,15 @@ def merge_orders(spec, orders, naps=1, aperture=1, anchor=None, sequence=None,
                 z = (merged[0] < w) | ~np.isfinite(merged[0]) if side == "Right" else \
                     (merged[0] > w) | ~np.isfinite(merged[0])
                 blue = merged[:, z]
-        sc = scales.get(o, 1.0)
-        if sc == "auto":
-            sc = autoscale(blue, green, (regions or {})[o])
-        sc = np.float32(sc)                       # the FLOAT scale field
         green[1] = green[1] * sc
         green[2] = green[2] * abs(sc)
         w, f, e, b, _ = mergespec(blue[0], blue[1], green[0], green[1], blue[2], green[2],
-                                  blue[3], green[3], sum_=sum_)
+                                  blue[3], green[3], sum_=nonidl_sum_flux)
         # [[owave],[oflux],[oerror],[obitflag]] with a DOUBLE flux: DOUBLE
         merged = np.array([w, f, e, b], dtype=np.float64)
         used[o] = float(sc)
         done.append(o)
-    if not weighted:
+    if unweighted:
         merged[2] = 1.
     return merged, used, done
 

@@ -82,7 +82,7 @@ class Frame:
 def read_frame(path):
     h = fits.getheader(path)
     base = os.path.basename(path)
-    m = re.match(r"^(.*?)(\d+)\.fits(\.fz)?$", base)
+    m = re.match(r"^(.*?)(\d+)\.fits(\.fz|\.gz)?$", base)
     prefix, number = (m.group(1), int(m.group(2))) if m else (base, -1)
     try:
         ra = _sexa(h.get("RA", "0:0:0"), True)
@@ -97,7 +97,7 @@ def read_frame(path):
     # name. A renamed copy or a derived image (t20-21.fits, an A-B made at
     # the telescope, still carries the first frame's FILENAME) is not.
     recorded = str(h.get("FILENAME", base)).strip()
-    if recorded and recorded != base and recorded + ".fz" != base:
+    if recorded and recorded != base and recorded + ".fz" != base and recorded + ".gz" != base:
         fr.kind = "ignored"
         fr.note = f"not a raw frame: its header names it {recorded}"
     return fr
@@ -131,7 +131,7 @@ class Sequence:
     frames: list                # Frame.name, in time order
     role: str                   # science | standard
     source: str                 # point | extended
-    pattern: str                # ABBA | object-sky | single
+    pattern: str                # ABBA | ABAB | A-B | object-sky | single
     pairs: list                 # [[a, b], ...]  a minus b
     beams: dict                 # frame -> beam label
     skipped: list = field(default_factory=list)
@@ -183,9 +183,16 @@ def analyse_sequence(frames):
             j = min(sky, key=lambda s: (abs(frames[s].mjd - frames[i].mjd), s))
             pairs.append([names[i], names[j]])
         return "object-sky", "extended", pairs, beams, [], notes
+    # An along-slit nod has two positions; pointing jitter can split one of
+    # them into small clusters, so each frame goes to the nearer of the two
+    # most used positions.
+    top = sorted(range(len(centres)), key=lambda k: -counts[k])[:2]
     letters = {}
-    for i, l in enumerate(labels):
-        letters.setdefault(l, "AB CDEFG"[len(letters)].strip() or "C")
+    for i, f in enumerate(frames):
+        l = min(top, key=lambda k: offset_arcsec(f, centres[k]))
+        labels[i] = l
+        if l not in letters:
+            letters[l] = "AB"[len(letters)]
         beams[names[i]] = letters[l]
     i = 0
     while i < len(frames) - 1:
@@ -200,7 +207,19 @@ def analyse_sequence(frames):
     if i == len(frames) - 1:
         skipped.append(names[i])
         notes.append(f"{names[i]} has no partner; left out.")
-    return "ABBA", "point", pairs, beams, skipped, notes
+    # The pattern from the pairs themselves: ABBA when every second pair is
+    # B-A (the case xspextool's 'ABBA to ABAB' switch is for), ABAB when all
+    # are A-B (the switch must then stay off).
+    first = [beams[a] == beams[pairs[0][0]] for a, _ in pairs] if pairs else []
+    if all(first):
+        pattern = "ABAB"
+    elif all(f == (k % 2 == 0) for k, f in enumerate(first)):
+        pattern = "ABBA"
+    else:
+        pattern = "A-B"
+        notes.append("The pairs do not alternate regularly, so combining their images first would "
+                     "cancel some of them; extract them pair by pair.")
+    return pattern, "point", pairs, beams, skipped, notes
 
 
 @dataclass
@@ -215,6 +234,7 @@ class Night:
     sequences: list
     warnings: list = field(default_factory=list)
     xs_background: bool = False         # the IDL default: see extract.py
+    flat_name: str = "flat"             # xspextool's Output Flat Name: cal/<flat_name>.fits
 
     # -------------------------------------------------- names and places
     @property
@@ -241,7 +261,8 @@ class Night:
         return os.path.join(d, f"{source}_{step}.{ext}")
 
     def flat_path(self):
-        return os.path.join(self.cal_dir, "flat.fits")
+        from triplespec_reducer.flat import flat_output_path
+        return flat_output_path(self.cal_dir, self.flat_name)
 
     def wavecal_path(self, source):
         return os.path.join(self.cal_dir, f"{source}_wavecal.fits")
@@ -334,8 +355,9 @@ def flat_sanity(on, off):
 def organize(raw_dir, out_dir, lookup=True, progress=None):
     """Read every frame in raw_dir and propose the whole night's plan."""
     say = progress or (lambda *_: None)
-    paths = sorted(glob.glob(os.path.join(raw_dir, "*.fits")) +
-                   glob.glob(os.path.join(raw_dir, "*.fits.fz")))
+    from triplespec_reducer.frames import find_raw_frames
+    from triplespec_reducer.instrument import read_instrfile
+    paths = find_raw_frames(raw_dir, read_instrfile().suffix or "*.fits*")
     frames = []
     for p in paths:
         try:

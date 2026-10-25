@@ -26,7 +26,7 @@ from triplespec_reducer.instrument import (read_modefile, SLITW_ARC, SLITW_PIX,
 # ------------------------------------------------------------- order edges
 
 def ts4_findorders(image, guesspos, sranges, step, slith_pix, slith_pix_range,
-                   degree, bufpix, comwidth):
+                   degree, bufpix, comwidth, qa=None):
     """
     TS4_FINDORDERS: trace the two outrigger peaks of every order.
 
@@ -37,6 +37,13 @@ def ts4_findorders(image, guesspos, sranges, step, slith_pix, slith_pix_range,
     peaks, robustly fitted, are then moved inward by 13% of the slit height
     to give the edges actually used. Returns edgecoeffs [norders, 2, deg+1]
     (bottom, top) and xranges [norders, 2].
+
+    With `qa` a list, one dict per order is appended holding what the IDL
+    draws on the combined flat while it works (WID=): guess, the guess
+    position (red dot); top / bot, the fitted outrigger centres it plots
+    (green '+', NaN where a walk had stopped); and for the bottom and top
+    edge (0, 1) the fitted curve over the order's columns (red) and the
+    points the robust fit rejected (blue '+').
     """
     nrows, ncols = image.shape
     norders = len(guesspos)
@@ -58,6 +65,8 @@ def ts4_findorders(image, guesspos, sranges, step, slith_pix, slith_pix_range,
         cen[gidx - degree:gidx + degree + 1] = guesspos[i][1]
         oedges[gidx - degree:gidx + degree + 1, 0] = guesspos[i][1] - slith_pix / 2.0
         oedges[gidx - degree:gidx + degree + 1, 1] = guesspos[i][1] + slith_pix / 2.0
+
+        pts_top, pts_bot = [], []
 
         def walk(ks, pdeg):
             dotop = dobot = True
@@ -90,6 +99,10 @@ def ts4_findorders(image, guesspos, sranges, step, slith_pix, slith_pix_range,
                     com_bot = com_top = np.nan
                     oedges[k] = [np.nan, np.nan]
                     cen[k] = y_guess
+                if dotop:
+                    pts_top.append((float(scols[k]), float(com_top)))
+                if dobot:
+                    pts_bot.append((float(scols[k]), float(com_bot)))
                 if com_top <= bufpix or com_top >= (nrows - 1 - bufpix):
                     dotop = False
                 if com_bot <= bufpix or com_bot > (nrows - 1 - bufpix):
@@ -110,14 +123,23 @@ def ts4_findorders(image, guesspos, sranges, step, slith_pix, slith_pix_range,
         edges = np.empty_like(oedges)
         edges[:, 1] = oedges[:, 1] - outrigger_offset
         edges[:, 0] = oedges[:, 0] + outrigger_offset
-        for j in range(2):
-            c, _ = I.robustpoly1d(scols, edges[:, j], degree, 3, 0.01)
-            edgecoeffs[i, j] = c
         x = np.arange(stop - start + 1, dtype=float) + start
+        curves, rejected = [], []
+        for j in range(2):
+            c, gb = I.robustpoly1d(scols, edges[:, j], degree, 3, 0.01)
+            edgecoeffs[i, j] = c
+            curves.append(I.poly(x, c))
+            z = gb == 0
+            rejected.append((scols[z].astype(float), edges[z, j].astype(float)))
         bot = I.poly(x, edgecoeffs[i, 0])
         top = I.poly(x, edgecoeffs[i, 1])
         z = (top > 0.0) & (top < nrows - 1) & (bot > 0) & (bot < nrows - 1)
         xranges[i] = [int(x[z].min()), int(x[z].max())]
+        if qa is not None:
+            qa.append(dict(guess=(float(guesspos[i][0]), float(guesspos[i][1])),
+                           top=np.array(pts_top).reshape(-1, 2),
+                           bot=np.array(pts_bot).reshape(-1, 2),
+                           x=x, edges=curves, rejected=rejected))
     return edgecoeffs, xranges
 
 
@@ -342,12 +364,28 @@ def normspecflat(flat, edgecoeffs, xranges, slith_arc, nxgrid, nygrid,
 
 # ------------------------------------------------------------- the whole step
 
-def make_flat(on_files, off_files=None, modeinfo=None, badpixmask=None,
+def make_flat(on_files, off_files=None, modeinfo=None, badpixmask="instrument",
               progress=None):
     """
     TS41CALS_MKFLAT. Returns a dict with the normalized flat and everything
     MC_WRITEFLAT records.
+
+    on_files    the lamps-on frames (one or more; one frame is used as it
+                is, neither scaled nor combined, as in the IDL)
+    off_files   the lamps-off frames, or none (the IDL's blank field)
+    badpixmask  "instrument": the mask ts4_soar.dat's BADPIXMASK names, as
+                xspextool loads it (none at all for BADPIXMASK=None); an
+                array; or None, no mask. Pixels where the mask is 0 are set
+                to 1 in the normalized flat.
+
+    result['findorders_qa'] holds the order-finding overlay for the combined
+    flat (see ts4_findorders), result['combined_for_orders'] that image.
     """
+    if not on_files:
+        raise ValueError("no lamps-on flat frames given")
+    if isinstance(badpixmask, str) and badpixmask == "instrument":
+        from triplespec_reducer.instrument import read_badpixmask
+        badpixmask = read_badpixmask()
     mi = modeinfo or read_modefile()
     say = progress or (lambda *_: None)
     say("Loading the flats")
@@ -364,9 +402,10 @@ def make_flat(on_files, off_files=None, modeinfo=None, badpixmask=None,
         var = var + darkvar[None]
     say("Finding the orders")
     med = I.meancomb(data)[0] if n != 1 else data[0]
+    foqa = []
     edgecoeffs, xranges = ts4_findorders(
         med, mi.guesspos, mi.findrange, mi.step, mi.slith_pix,
-        mi.slith_pix_range, mi.edgedeg, mi.norm_ybuffer, mi.comwin)
+        mi.slith_pix_range, mi.edgedeg, mi.norm_ybuffer, mi.comwin, qa=foqa)
     if n != 1:
         say("Scaling the flats")
         data, var = ka_scaleflats(data, var, edgecoeffs, xranges)
@@ -379,16 +418,53 @@ def make_flat(on_files, off_files=None, modeinfo=None, badpixmask=None,
                                           mi.norm_nxg, mi.norm_nyg,
                                           mi.norm_ybuffer, var)
     if badpixmask is not None:
-        flat[rotate(badpixmask, mi.rotation) == 0] = 1.0
+        flat[rotate(np.asarray(badpixmask), mi.rotation) == 0] = 1.0
     return dict(flat=flat, var=ovar, rms=rms, model=model, combined=mean,
+                combined_for_orders=med, findorders_qa=foqa,
                 edgecoeffs=edgecoeffs, xranges=xranges, orders=list(mi.orders),
                 modeinfo=mi, header=hdrs[0], headers=hdrs,
                 files=[str(f) for f in on_files],
                 darks=[str(f) for f in (off_files or [])])
 
 
-def write_flat(path, result, version="TSR-1.0"):
-    """MC_WRITEFLAT: ext 0 the header, ext 1-3 flat, variance, flags (unrotated)."""
+def flat_output_path(calpath, flatoname):
+    """The file the IDL writes for Output Flat Name `flatoname`: cal/<name>.fits."""
+    import os
+    name = flatoname[:-5] if flatoname.endswith(".fits") else flatoname
+    return os.path.join(calpath, name + ".fits")
+
+
+def _hdrinfo(header, keywords):
+    """
+    MC_GETHDRINFO: each keyword's value as FXPAR types it, and its comment;
+    a missing one becomes "Doesn't Exist" with no comment. Tag names lose
+    their '-' (CREATE_STRUCT).
+    """
+    out = []
+    for k in keywords:
+        tag = "".join(k.split("-")).upper()
+        if k in header:
+            out.append((tag, I.fxpar(header, k), I.fxcomment(header, k)))
+        else:
+            out.append((tag, "Doesn't Exist", ""))
+    return out
+
+
+def write_flat(path, result, version=None, instrinfo=None):
+    """
+    MC_WRITEFLAT as TS41CALS_MKFLAT calls it: ext 0 the header, ext 1-3
+    flat, variance, flags (unrotated).
+
+    The header starts with the instrument file's KEYWORD list taken from
+    the first lamps-on frame, its IRAFNAME (FILENAME) keyword set to the
+    output name; VERSION is the Spextool version (data/Version.dat, '4.1')
+    unless `version` is given; LINCRMAX is the instrument file's LINCORMAX.
+    `instrinfo` is read_instrfile()'s structure (default: ts4_soar.dat).
+    """
+    import os
+    from triplespec_reducer.instrument import read_instrfile, spextool_version
+    info = instrinfo or read_instrfile()
+    version = spextool_version() if version is None else version
     mi = result["modeinfo"]
     orders = result["orders"]
     ec = result["edgecoeffs"]
@@ -397,12 +473,11 @@ def write_flat(path, result, version="TSR-1.0"):
     f32 = np.float32
     # MC_WRITEFLAT: the raw keywords as FXPAR typed them, then its own, every
     # number written by FXADDPAR/SXADDPAR in its IDL type (the FLOATs below).
-    for key in ("FILENAME", "OBJECT", "UT", "DATE", "EXPTIME", "RA", "DEC",
-                "FSAMPLE", "COADDS", "AIRMASS"):
-        if key in src:
-            I.fxaddpar(hdr, key, I.fxpar(src, key), I.fxcomment(src, key))
-    I.fxaddpar(hdr, "FILENAME", path.split("/")[-1],
-               I.fxcomment(src, "FILENAME") if "FILENAME" in src else "")
+    irafname = "".join(info.irafname.split("-")).upper()
+    for tag, val, com in _hdrinfo(src, info.keywords):
+        if tag == irafname:
+            val = os.path.basename(path)
+        I.fxaddpar(hdr, tag, val, com)
     I.fxaddpar(hdr, "MODENAME", mi.modename, " Spectroscopy mode")
     I.fxaddpar(hdr, "EDGEDEG", ec.shape[2] - 1, " Degree of the polynomial fit to order edges")
     I.fxaddpar(hdr, "NORDERS", len(orders), " Number of orders identified")
@@ -415,7 +490,7 @@ def write_flat(path, result, version="TSR-1.0"):
     I.fxaddpar(hdr, "RP", int(RESOLVINGPOWER), " Resolving power")
     I.fxaddpar(hdr, "ROTATION", mi.rotation, " IDL ROTATE value")
     I.fxaddpar(hdr, "VERSION", version, " Spextool version")
-    I.fxaddpar(hdr, "LINCRMAX", 80000, " Linearity maximum (DN)")    # LONG(LINCORMAX=80000.0)
+    I.fxaddpar(hdr, "LINCRMAX", int(info.lincormax), " Linearity maximum (DN)")    # LONG
     I.fxaddpar(hdr, "DARK", "None", " Dark frame")
     for i, o in enumerate(orders):
         I.fxaddpar(hdr, f"ODR{o:02d}RMS", f32(result["rms"][i]),
@@ -431,9 +506,9 @@ def write_flat(path, result, version="TSR-1.0"):
             I.fxaddpar(hdr, f"ODR{o:02d}_T{k + 1}", np.float64(ec[i, 1, k]),
                        f" a{k} edge coefficient for top of order {o:02d}")
     I.addhistlabel(hdr, "Xspextool History")
-    I.sxaddhist(hdr, "This flat was created by 1. scaling "
-                + ", ".join(str(I.fxpar(h, "FILENAME")) if "FILENAME" in h else f.split("/")[-1]
-                            for f, h in zip(result["files"], result.get("headers", [{}] * len(result["files"]))))
+    names = [str(I.fxpar(h, info.irafname)) if info.irafname in h else "Doesn't Exist"
+             for h in result.get("headers", [result["header"]])]
+    I.sxaddhist(hdr, "This flat was created by 1. scaling " + ", ".join(names)
                 + " using the median and then 2. Robust Mean combining the resulting images.")
     rot = mi.rotation
     hdul = fits.HDUList([fits.PrimaryHDU(header=hdr),

@@ -18,7 +18,49 @@ For a galaxy observed object–sky, the only sky removal is therefore the A − 
 **Combine images with "scale orders" stops** with an error in the IDL tool when every scale
 factor is finite. *Option*: `scale_orders="intended"` in `combineimgs.combine_images`.
 
+**Point sources are extracted optimally, although the instrument file disables it.**
+TS4_SOAR's file greys out the *Optimal Extraction* box (`OPTIMALEXTRACTION=0 0`) and its README
+advises the aperture sum, but the interface's *PS BG Subtraction* switch, on by default
+(`PSBGSUB=1`), also ticks the optimal box when it is set at start-up. Every point-source
+extraction with a background therefore passes the PSF radius (2.2″) and the spatial map to the
+extraction, which then returns the optimal estimate of the whole star within the PSF radius.
+This is the default here too. *Option*: `optimal=False` (Extract → "Sum with the background
+instead"), a sum with a background that the IDL tool cannot make for TripleSpec. On the test
+night the optimal flux of the standard is 17–22% higher than the 1″ sum, and the final galaxy
+spectrum about 15% fainter, its slope between bands changed by about 4%.
+
+**Combining after a spectrum is left out of an order.** The IDL tool combines only the kept
+spectra but passes the mask of the whole stack: the unweighted means still divide by the total
+number of spectra, the median repeats the last spectrum, and the flags come from the clipped
+columns. *Option*: `intended_masks=True` in `combine.combine` and `combine.correct_shapes`.
+
+**A line traced on too few points stops the wavelength calibration.** One point fails the
+line's fit and stops the whole calibration. *Option*: `short_lines="skip"` (Calibrate → "Leave
+out lines traced on too few points"), which leaves the line out and lists it.
+
+## Not available in the IDL tool, offered here
+
+* **Merging without weights, or summing the overlap**: the IDL tool's *Weighted* off and *Sum*
+  both stop with an undefined variable. Here they are `merge_unweighted` and `merge_sum`, off.
+* **The IP kernel method, the spline tension and the propagation switch** of the telluric
+  step: for TripleSpec the IDL tool shows no Method buttons, fixes the tension at 10 and always
+  propagates the standard's uncertainty. The defaults here are those.
+
 ## Matched as they are
+
+* **The trace's significance threshold is 0.** The instrument file says `TRACESIGTHRESH=0.1`,
+  which the IDL tool reads as an integer.
+* **Correcting the spectral shapes does nothing for apertures that are not combined**: the
+  IDL routine refuses the three-dimensional pixel mask it is then given. Here a note says so.
+* **Fixed aperture positions with an order left out below one extracted** read the empty
+  position of the order left out, and the IDL tool does not finish; here this case is refused
+  with an explanation. Overlapping apertures stop both, with the same message.
+* **Extracting without a wavelength calibration** (a blank wavecal name) subtracts the
+  extended-source background, sets the variance to 1 after the fit (the error-propagation flag
+  is not passed), and replaces bad pixels whenever the optimal switch is on: reproduced.
+* **The cleaning panel smooths once per file opened**, from the edits kept so far; edits not
+  kept are not written. The Savitzky–Golay routine also overwrites the width it is given, so
+  the history records 3 pixels for the default 3.6.
 
 * **The one-dimensional sky spectra for the wavelength solution come from the first frame
   only**, not from the median of the frames; the tracing of the lines along the slit does use

@@ -228,3 +228,122 @@ def test_header_round_trip():
     assert I.fxpar(h, "D") == 1.39090757573
     assert isinstance(I.fxpar(h, "G"), int)                  # '38': a LONG
     assert isinstance(I.fxpar(h, "S"), np.float32)           # '2.4 ': a FLOAT
+
+
+def _mcl_log():
+    out = {}
+    for line in open(os.path.join(REF, "ref_mergeclean.log")):
+        t = line.replace("|", " ").split()
+        if t and t[0].isupper():
+            out.setdefault(t[0], []).append(line.rstrip("\n"))
+    return out
+
+
+needs_mcl = pytest.mark.skipif(not os.path.exists(os.path.join(REF, "ref_mergeclean.log")),
+                               reason="ref_mergeclean.pro outputs not present")
+MCL_TRIMS = {5: [("Green", "Right", 1.47), ("Blue", "Left", 1.44)],
+             6: [("Green", "Right", 1.20), ("Blue", "Left", 1.16)],
+             7: ("Green", "Left", 0.97)}
+MCL_SCALES = {5: "auto", 3: 1.05, 6: "auto"}
+MCL_REGIONS = {5: (1.42, 1.47), 6: (1.22, 1.15)}
+
+
+def _native(a):
+    return a.astype(a.dtype.newbyteorder("="))
+
+
+@needs_mcl
+def test_merge_options(tmp_path):
+    """ref_mergeclean.pro: auto scale on the uncut spectra, green + blue cuts, 'Inside'."""
+    log = _mcl_log()
+    cs = _native(fits.getdata(os.path.join(REF, "tc_NGC134.fits")))
+    kw = dict(anchor=4, scales=MCL_SCALES, regions=MCL_REGIONS, trims=MCL_TRIMS)
+    m, used, done = M.merge_orders(cs, [3, 4, 5, 6, 7], sequence=[5, 3, 6], **kw)
+    assert np.float32(used[5]) == np.float32(float(log["SCALE5"][0].split()[1]))
+    assert np.float32(used[6]) == np.float32(float(log["SCALE6"][0].split()[1]))
+    p = str(tmp_path / "mc_merged.fits")
+    M.write(p, m, fits.getheader(os.path.join(REF, "comb_NGC134.fits")), used, done,
+            source="tc_NGC134.fits")
+    same(fits.getdata(p), fits.getdata(os.path.join(REF, "mc_merged.fits")), "merged with cuts")
+    m7, _, _ = M.merge_orders(cs, [3, 4, 5, 6, 7], sequence=[5, 3, 6, 7], **kw)
+    same(m7, fits.getdata(os.path.join(REF, "mc_inside.fits")).astype(float), "'Inside' merge")
+
+
+def test_merge_rules():
+    """The add-order list, and 'auto' without a region refused as XMERGEORDERS refuses it."""
+    assert M.addable_orders([3, 4, 5, 6, 7], [4]) == [3, 5]
+    assert M.addable_orders([3, 4, 5, 6, 7], [4, 3]) == [5]
+    assert M.addable_orders([3, 4, 5, 6, 7], [3, 4, 5, 6, 7]) == []
+    w = np.linspace(1.0, 2.0, 50)
+    spec = np.zeros((3, 4, 50), np.float32)
+    for k, off in enumerate((0.0, 0.8, 1.6)):
+        spec[k, 0], spec[k, 1], spec[k, 2] = w + off, 1.0, 0.1
+    with pytest.raises(ValueError):
+        M.merge_orders(spec, [3, 4, 5], anchor=3, sequence=[5, 4])
+    with pytest.raises(ValueError):
+        M.merge_orders(spec, [3, 4, 5], anchor=3, scales={4: "auto"})
+    m, used, _ = M.merge_orders(spec, [3, 4, 5], anchor=3, scales={4: "auto"}, regions={4: "overlap"})
+    assert used[4] == np.float32(1.0)
+
+
+@needs_mcl
+def test_clean_session(tmp_path):
+    """ref_mergeclean.pro: xcleanspec's edit buffer, 'Error' type, defaults, one smoothing."""
+    log = _mcl_log()
+    S = CL.Session(os.path.join(REF, "mc_merged.fits"))
+    d = log["DEFAULTS"][0].split()
+    assert S.defaults["sgwin"] == np.float32(d[1]) and S.defaults["fwhm"] == np.float32(d[2])
+    i = S.index()
+    S.fix(i, 1.27, 1.29)
+    S.fix(i, 1.30, 1.285)
+    S.commit()
+    S.remove(i, 1.82, 1.80, spectype="Error")
+    S.commit()
+    S.fix(i, 1.55, 1.56)
+    S.undo()
+    S.fix(i, 2.10, 2.12, spectype="Error")
+    same(S.espec[0], fits.getdata(os.path.join(REF, "cl_edits.fits")), "committed edits")
+    S.smooth()
+    p = str(tmp_path / "cl.fits")
+    S.write(p)
+    same(fits.getdata(p), fits.getdata(os.path.join(REF, "cl_session.fits")), "smoothed session")
+    assert S.history == log["SGHIST"][0].split("|")[1]
+    with pytest.raises(RuntimeError):
+        S.smooth()
+    G = CL.Session(os.path.join(REF, "mc_merged.fits"))
+    G.smooth(method="Gaussian")
+    same(G.espec[0], fits.getdata(os.path.join(REF, "cl_session_g.fits")), "Gaussian")
+    assert G.history == log["GHIST"][0][6:]
+    with pytest.raises(ValueError):
+        CL.check_degree(3.6, 4.)
+    CL.check_degree(3.6, 3.)
+
+
+@needs_mcl
+def test_spex2text(tmp_path):
+    from triplespec_reducer import textexport as TX
+    srcs = [os.path.join(REF, f + ".fits") for f in ("comb_NGC134", "spectra0116", "mc_merged")]
+    srcs.append(os.path.join(ROOT, "validation", "py_out", "HD225200_ci_spec.fits"))
+    for s in srcs:
+        if not os.path.exists(s):
+            continue
+        out, = TX.spex2text(s, outdir=str(tmp_path))
+        ref = os.path.join(REF, "s2t", os.path.basename(out))
+        assert open(out).read() == open(ref).read(), os.path.basename(out)
+
+
+@needs_mcl
+def test_xgetoffset():
+    from triplespec_reducer import getoffset as GO
+    from triplespec_reducer.instrument import INSTRUMENT_DIR
+    cal = W.read_linecal(os.path.join(INSTRUMENT_DIR, "OHXD_LineCal.fits"))
+    k = W.nantrim(cal["xcorspec"][0], 2)
+    wh, fh = cal["xcorspec"][0][k], cal["xcorspec"][1][k]
+    s1 = _native(fits.getdata(os.path.join(REF, "wc_spec1d_4.fits")))
+    clicks = [(784.3, 783.6), (1182.2, 1181.4), (920.7, 920.2)]
+    for n, line in enumerate(_mcl_log()["GOFF"]):
+        v = [float(t) for t in line.split()[2:]]
+        off, det = GO.xgetoffset(wh, fh, s1[0], s1[1], *clicks[n])
+        assert np.array_equal(np.float32(det["template"][1]), np.float32(v[0:5]))
+        assert np.array_equal(np.float32(det["observed"][1]), np.float32(v[5:10]))
+        assert off == np.float32(v[12])

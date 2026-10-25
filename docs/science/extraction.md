@@ -57,28 +57,49 @@ peak (the nucleus), pair by pair. Several positions give spatially resolved spec
 A point source's spectrum is not exactly parallel to the order: atmospheric dispersion and
 the optics move it by a fraction of a pixel along the order. Every 5 columns the profile of 5
 summed columns is fitted with a Gaussian; the centres, as a function of wavelength, are fitted
-with a polynomial (degree 1), points more than 3 pixels off or of low significance rejected.
+with a polynomial (degree 1), points more than 3 pixels off rejected.
 The aperture follows this trace.
 
-## Summing the light
+## Measuring the light
 
 For every wavelength of the resampled grid, the cell's value is the exact-area sum of the
 detector pixels under it. Then, for a point source:
 
-1. **Background.** The difference image still holds a residual — the sky changed a little
+1. **Background.** The difference image still holds a residual: the sky changed a little
     between A and B. At each wavelength it is fitted across the slit, between 2.5″ and 7.5″
     from each aperture, with a polynomial of degree 1, and subtracted; its uncertainty is
     added to the error.
 
-2. **Sum.** The flux inside the aperture (radius 1″ by default) is summed, the pixels at the
-    aperture's edges counted by the fraction inside it:
+2. **Optimal extraction.** With the background subtracted, as the IDL tool does by default,
+    the flux is not a plain sum but a profile-weighted estimate (Horne 1986). The spatial
+    profile of the order, measured from the image itself, is fitted along the order, so that
+    at each wavelength a profile $P(y)$ is known. Rebuilt at the wavelength and interpolated
+    onto the slit, it is scaled to the data with a robust straight-line fit (points beyond
+    6σ left out), forced to the aperture's sign, and normalized to unit sum within the PSF
+    radius (2.2″). Every pixel in the aperture then gives an estimate of the whole flux,
+    ${\rm data}(y)/P(y)$, with variance $\sigma^2(y)/P(y)^2$, and the flux is their
+    variance-weighted mean:
 
     $$
-    f(\lambda) = \sum_{y} w(y)\,\big[{\rm work}(\lambda,y) - {\rm bg}(\lambda,y)\big],\qquad
-    \sigma_f^2 = \sum_y w(y)^2\,\big[\sigma^2_{\rm work} + \sigma^2_{\rm bg}\big] ,
+    f(\lambda) = \frac{\sum_y {\rm data}(y)\,P(y)/\sigma^2(y)}{\sum_y P(y)^2/\sigma^2(y)},\qquad
+    \sigma_f^2 = \frac{1}{\sum_y P(y)^2/\sigma^2(y)} .
     $$
-    
+
+    Because the profile is normalized within the PSF radius, this is the flux of the whole
+    star inside 2.2″, not only of the 1″ aperture: on this night's standard it is 17–22%
+    higher than the 1″ sum, with the same signal-to-noise.
+
+3. **Without the background** (the switch off), the flux inside the aperture is summed, the
+    pixels at the aperture's edges counted by the fraction inside it:
+
+    $$
+    f(\lambda) = \sum_{y} w(y)\,{\rm work}(\lambda,y),\qquad
+    \sigma_f^2 = \sum_y w(y)^2\,\sigma^2_{\rm work} ,
+    $$
+
     with $w(y)\in[0,1]$ the fraction of each slit pixel inside the aperture.
+
+An extended source is always summed this way, over the apertures you place.
 
 ## The files
 

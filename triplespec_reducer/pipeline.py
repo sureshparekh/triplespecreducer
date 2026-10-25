@@ -38,8 +38,20 @@ class Options:
     ybuffer: int = 1
     atmosthresh: float = 0.4
     psnaps: int = 2                     # an A-B pair or combined pairs: a positive and a negative beam
-    psnaps_single: int = 1              # A and A-Sky: the source appears once
+    psnaps_single: int = 2              # A and A-Sky: xspextool keeps PSNAPS (2) there too; 1-4
     findmode: str = "auto"              # auto | guess | fixed
+    guess: list = None                  # Guess / Fix: one list of positions (arcsec) for every order
+    trace: bool = True                  # False: Use Ap Positions (no tracing); Fix implies it
+    psbgsub: bool = True                # PS BG Subtraction (PSBGSUB=1); it also switches optimal on
+    optimal: bool = None                # None: as the IDL GUI, on with the background; False with the
+                                        # background on is a sum with background (not in the TS4 GUI)
+    psfradius: float = 2.2              # PSPSFRAD, arcsec
+    medprofile: bool = False            # Median Profile
+    ps_orders: list = None              # PS Orders: None for all
+    xs_orders: list = None              # XS Orders: None for all
+    xsbgsub: bool = True                # XS BG Subtraction (XSBGSUB=1)
+    bdpixthresh: float = 7.0            # Bad Pix Thresh (BADPIXELTHRESH); only without a wavecal file
+    no_wavecal: bool = False            # a blank Full Wavecal Name: extraction in pixels (1D)
     apradius: float = 1.0
     psbgstart: float = 2.5
     psbgwidth: float = 5.0
@@ -47,7 +59,7 @@ class Options:
     tracestep: int = 5
     tracesumap: int = 5
     tracewinthresh: float = 3.0
-    tracesigthresh: float = 0.1
+    tracesigthresh: float = 0.0         # ts4_soar.dat 0.1, read by xspextool with FIX(): 0
     tracedeg: int = 1
     xs_positions: list = None           # None: the profile peak of each pair
     xs_radii: list = None
@@ -55,11 +67,16 @@ class Options:
     xs_bgdeg: int = 0
     xs_background: bool = False         # IDL default: not subtracted (see extract.py)
     wavecal_offset: float = None        # None: automatic cross-correlation (the default)
+    wavecal_frames: dict = None         # source -> frames to calibrate on (default: its own, or the arcs)
+    wavecal_arctype: dict = None        # source -> 'Sky' | 'CuHeAr Arc'
+    short_lines: str = "abort"          # a line with too few points stops the wavecal, as in IDL;
+                                        # 'skip' leaves it out (not IDL)
     mode: str = "A-B"                   # A-B | A | A-Sky
     combine_images: bool = False        # XSPEXTOOL_COMBINEIMGS before extracting
     combimg_stat: str = "Robust Mean (Std Error)"   # ts4_soar.dat COMBSTAT
     combimg_thresh: float = 8.0
-    abba2abab: bool = True              # so the combined pairs add up
+    abba2abab: bool = True              # applied only to sequences whose pairs alternate (ABBA),
+                                        # the choice an IDL user makes by hand for them
     combimg_subtract_sky: bool = False
     sky_frames: list = None             # A-Sky: frames combined into the sky
     signs: list = None                  # override the aperture signs
@@ -71,6 +88,12 @@ class Options:
     combthresh: float = 8.0
     correct_shapes: bool = False
     combine_apertures: bool = False
+    scale_spectra: bool = True          # 'Scale Spectra' (the tutorial scales; IDL leaves it to the user)
+    scale_mode: str = "Median"          # XMC_SCALESPEC 'Scale to': Median | Spectrum | None
+    scale_range: tuple = None           # (w0, w1) um; None: the middle 80% of the order
+    scale_spectrum: int = None          # for 'Spectrum': the reference, 0-based
+    prune: dict = None                  # source -> [dict(order, aperture, remove=[i..], regions=[(w0, w1[, spectra])])]
+    combine_basic: bool = False         # xcombspec /BASIC header
     # xtellcor
     kernel_order: int = 6               # Pa delta, as the TS4 README advises
     normreg: list = field(default_factory=lambda: [[0.990, 0.997], [1.013, 1.020]])
@@ -79,16 +102,21 @@ class Options:
     tcmethod: str = "Deconvolution"
     propstdunc: bool = True
     units: str = "ergs s-1 cm-2 A-1"
-    tension: float = 10.
+    tension: float = 10.                # not a control in IDL TS4, where it is 10
+    telluric_model: bool = False        # XTELLCOR 'Model': also write <source>_tc_modVega.fits
+    basic_standards: dict = None        # standard -> dict(temp=K, restore=True): XTELLCOR_BASIC,
+                                        # for a standard that is not an A0 V star
+    telluric_from: dict = None          # source -> an existing telluric file: XTELLCOR_FINISH
     vshift: float = None                # override the measured Vega velocity
     shift_regions: dict = None          # order -> [w0, w1]; None: chosen from ATRAN
     find_shift: bool = True
     # xmergeorders
     anchor: int = 3
-    merge_scales: dict = None
-    merge_trims: dict = None
-    merge_weighted: bool = True
-    merge_sum: bool = False
+    merge_scales: dict = None           # order -> factor, or 'auto' (needs merge_regions)
+    merge_trims: dict = None            # order -> (spectrum, side, wavelength) or a list of them
+    merge_regions: dict = None          # order -> (w0, w1) or 'overlap', for 'auto' scales
+    merge_unweighted: bool = False      # not in Spextool 4.1: XMERGEORDERS stops on it
+    merge_sum: bool = False             # not in Spextool 4.1 either
     # xcleanspec
     clean: bool = False
     clean_method: str = "Savitzky-Golay"
@@ -172,11 +200,8 @@ class Reducer:
         if os.path.exists(out) and not self.force:
             return out
         self.say("flat", "Building the flat")
-        from astropy.io import fits as _f
-        from triplespec_reducer.instrument import INSTRUMENT_DIR
-        bpm = _f.getdata(os.path.join(INSTRUMENT_DIR, "fakebmask.fits"))
         r = F.make_flat(self._raw(self.n.flats_on), self._raw(self.n.flats_off) or None,
-                        badpixmask=bpm, progress=lambda s: self.say("flat", s))
+                        badpixmask="instrument", progress=lambda s: self.say("flat", s))
         F.write_flat(out, r)
         self._flat = None
         self.log("night", "flat", on=self.n.flats_on, off=self.n.flats_off,
@@ -191,10 +216,16 @@ class Reducer:
             files, kind = self._raw(self.n.arcs), "CuHeAr Arc"
         else:
             files, kind = self._raw(self.n.seq(source).frames), "Sky"
+        # the Wavecal Images and the type are the user's free choice in xspextool
+        if (self.o.wavecal_frames or {}).get(source):
+            files = self._raw(self.o.wavecal_frames[source])
+        kind = (self.o.wavecal_arctype or {}).get(source, kind)
         self.say("wavecal", f"Calibrating {source} on {kind}")
         r = W.make_wavecal(files, self.flatinfo(), arctype=kind,
-                           progress=lambda s: self.say("wavecal", s), offset=self.o.wavecal_offset)
+                           progress=lambda s: self.say("wavecal", s), offset=self.o.wavecal_offset,
+                           short_lines=self.o.short_lines)
         W.write_wavecal(out, r)
+        W.write_wavecal_qa(r, out[:-5])
         self._wc.pop(source, None)
         self.last_log = dict(type=kind, frames=[os.path.basename(f) for f in files],
                              offset=r["offset"], rms_angstrom=r["sol1d"]["rms"],
@@ -206,14 +237,18 @@ class Reducer:
 
     def _extract_kwargs(self, source, wcname, single=False):
         o = self.o
-        return dict(atran=self.atran(), apradius=o.apradius,
-                    psbg=(o.psbgstart, o.psbgwidth, o.psbgdeg),
-                    npeaks=o.psnaps_single if single else o.psnaps,
-                    findmode=o.findmode, tracestep=o.tracestep, sumap=o.tracesumap,
+        return dict(atran=None if o.no_wavecal else self.atran(), apradius=o.apradius,
+                    psbg=(o.psbgstart, o.psbgwidth, int(o.psbgdeg)),
+                    npeaks=len(o.guess) if o.findmode != "auto" and o.guess else
+                    (o.psnaps_single if single else o.psnaps),
+                    findmode=o.findmode, guess=o.guess, trace=o.trace, psbgsub=o.psbgsub,
+                    optimal=o.optimal, psfradius=o.psfradius, medprofile=o.medprofile,
+                    ps_orders=o.ps_orders, xs_orders=o.xs_orders, xsbgsub=o.xsbgsub,
+                    bdpixthresh=o.bdpixthresh, tracestep=o.tracestep, sumap=o.tracesumap,
                     winthresh=o.tracewinthresh, sigthresh=o.tracesigthresh,
                     tracedeg=o.tracedeg, ybuffer=o.ybuffer, atmosthresh=o.atmosthresh,
                     flatname=os.path.basename(self.n.flat_path()),
-                    wavecalname=os.path.basename(self.n.wavecal_path(wcname)),
+                    wavecalname="" if o.no_wavecal else os.path.basename(self.n.wavecal_path(wcname)),
                     signs=o.signs, flatfield=o.flatfield, errorprop=o.errorprop,
                     trace_in=o.import_trace,
                     trace_out=self.n.path(source, "trace", "dat") if o.store_trace else None)
@@ -226,9 +261,10 @@ class Reducer:
         if pos is None:
             fl, wc = self.flatinfo(), self._wc_current
             work, _, _, _ = E.load_image(files, fl, mode=mode, combined=combined, sky=sky)
+            at = (None, None) if o.no_wavecal else self.atran()
             prof = E.mkspatprof2d(work, fl["omask"], wc["wavecal"], wc["spatcal"],
                                   fl["slith_arc"] / fl["slith_pix"], o.ybuffer,
-                                  *self.atran(), o.atmosthresh)
+                                  *at, o.atmosthresh)
             p, _ = E.findpeaks(prof, 1, mode="auto")
             pos = [float(np.round(np.nanmedian(p[:, 0]), 1))]
         return dict(xs_positions=pos, xs_radii=o.xs_radii or [o.apradius] * len(pos),
@@ -238,7 +274,7 @@ class Reducer:
         """What one extraction is made from: pairs, single frames, or one combined image."""
         s = self.n.seq(source)
         o = self.o
-        if o.combine_images:
+        if o.combine_images and s.pattern != "A-B":
             return [("combined", [f for pr in s.pairs for f in pr])]
         if o.mode == "A-Sky":
             return [("A-Sky", [f]) for f, b in s.beams.items() if b != "sky"]
@@ -266,7 +302,7 @@ class Reducer:
         o = self.o
         fl = self.flatinfo()
         wcname = s.wavecal_from
-        wc = self._wc_current = self.wcinfo(wcname)
+        wc = self._wc_current = W.no_wavecal(fl) if o.no_wavecal else self.wcinfo(wcname)
         mode, frames = self.units(source)[k]
         if mode == "combined":
             out = self.n.path(source, "specall")
@@ -299,13 +335,28 @@ class Reducer:
                      signs=r["signs"].tolist(),
                      written=[os.path.basename(p) for p in r["written"]]), r["written"])
 
-    def _log_extract(self, source, entries):
+    def _log_extract(self, source, entries, left_out=()):
         s = self.n.seq(source)
         o = self.o
         if entries:
             self.log(source, "extract", source_type=s.source, pattern=s.pattern, wavecal=s.wavecal_from,
                      mode="combined image" if o.combine_images else o.mode, pairs=entries,
-                     xs_background=o.xs_background if s.source == "extended" else None)
+                     xs_background=o.xs_background if s.source == "extended" else None,
+                     notes=[f"{' - '.join(fr)} left out: {msg}" for fr, msg in left_out])
+
+    def _left_out(self, source, refused):
+        """
+        A pair the IDL tool refuses (an aperture off the slit, overlapping
+        apertures: its own messages) is left out, as the IDL user would
+        leave it out; the target fails only when every unit is refused.
+        """
+        units = self.units(source)
+        out = [(units[k][1], msg.split(": ", 1)[-1]) for k, msg in sorted(refused)]
+        for fr, msg in out:
+            self.say("extract", f"{source}: {' - '.join(fr)} left out: {msg}")
+        if len(out) == len(units):
+            raise ValueError(f"every unit was refused: {out[0][1]}")
+        return out
 
     def extract(self, source):
         """
@@ -315,13 +366,17 @@ class Reducer:
         s = self.n.seq(source)
         if not os.path.exists(self.n.wavecal_path(s.wavecal_from)):
             self.wavecal(s.wavecal_from)
-        written, entries = [], []
+        written, entries, refused = [], [], []
         for k in range(len(self.units(source))):
-            e, w = self.extract_unit(source, k)
+            try:
+                e, w = self.extract_unit(source, k)
+            except ValueError as err:
+                refused.append((k, f"ValueError: {err}"))
+                continue
             written += w
             if e:
                 entries.append(e)
-        self._log_extract(source, entries)
+        self._log_extract(source, entries, self._left_out(source, refused))
         return written
 
     def spectra(self, source):
@@ -335,24 +390,32 @@ class Reducer:
                 out.append(p)
         return out
 
-    def combine(self, source):
+    def combine(self, source, files=None):
+        """XCOMBSPEC on the source's spectra (or on `files`); the loaded stack stays in self.loaded."""
         out = self.n.path(source, "comb")
-        if os.path.exists(out) and not self.force:
+        if os.path.exists(out) and not self.force and files is None:
             return out
-        files = self.spectra(source)
+        files = files or self.spectra(source)
         if not files:
             files = self.extract(source)
         self.say("combine", f"{source}: combining {len(files)} spectra")
-        L = C.load(files, combine_apertures=self.o.combine_apertures)
-        scales = {}
+        o = self.o
+        L = C.load(files, combine_apertures=o.combine_apertures)
+        for pr in (o.prune or {}).get(source, []):
+            C.prune(L, pr["order"], aperture=pr.get("aperture", 1), remove=pr.get("remove", ()),
+                    regions=pr.get("regions", ()))
+        scales, notes = {}, []
         for ap in range(1, L["naps"] + 1):
-            sc, mr = C.scale(L, self.o.scaleorder, aperture=ap)
-            scales[ap] = sc
-            if self.o.correct_shapes:
-                C.correct_shapes(L, aperture=ap)
-        C.combine(L, statistic=self.o.statistic, thresh=self.o.combthresh)
-        C.write(out, L)
-        notes = []
+            if o.scale_spectra:
+                sc, mr = C.scale(L, o.scaleorder, aperture=ap, srange=o.scale_range, mode=o.scale_mode,
+                                 spectrum=o.scale_spectrum)
+                scales[ap] = sc
+            if o.correct_shapes and C.correct_shapes(L, aperture=ap) is False:
+                notes.append(f"aperture {ap}: the spectral shapes were not corrected, as XCOMBSPEC "
+                             "does not correct them for apertures that are not combined")
+        C.combine(L, statistic=o.statistic, thresh=o.combthresh)
+        C.write(out, L, basic=o.combine_basic)
+        self.loaded = L
         for ap, sc in scales.items():
             med = np.median(sc)
             for f, v in zip(files, sc):
@@ -361,6 +424,8 @@ class Reducer:
                                  "look at it, and leave it out if it is not like the others.")
         self.log(source, "combine", files=[os.path.basename(f) for f in files],
                  scaleorder=self.o.scaleorder, scales={k: v.tolist() for k, v in scales.items()},
+                 scale_spectra=o.scale_spectra, scale_mode=o.scale_mode, scale_range=o.scale_range,
+                 scale_spectrum=o.scale_spectrum, prune=(o.prune or {}).get(source, []),
                  statistic=self.o.statistic, thresh=self.o.combthresh, notes=notes)
         return out
 
@@ -407,6 +472,10 @@ class Reducer:
             raise ValueError(f"Enter B and V for {std.object} before the telluric step.")
         sp, tp = self.combine(std.name), self.combine(source)
         o = self.o
+        if (o.telluric_from or {}).get(source):
+            return self._telluric_finish(source, o.telluric_from[source], tp, out)
+        if (o.basic_standards or {}).get(std.name):
+            return self._telluric_basic(source, std, sp, tp, out)
         self.say("telluric", f"{source}: with {std.name}")
         st = T.load(sp, tp, std.bmag, std.vmag)
         T.conkernel(st, order=o.kernel_order, normreg=o.normreg, normdegree=o.normdegree,
@@ -433,12 +502,58 @@ class Reducer:
                     if not done:
                         notes.append(f"order {order}: no region gave a shift inside +-1.5 px; 0 used")
         T.corrected(st, propstdunc=o.propstdunc)
-        T.write(out, st, tellpath=tell, std_name=std.object)
+        T.write(out, st, tellpath=tell, std_name=std.object, model=o.telluric_model,
+                vegapath=self.n.path(source, "tc_modVega") if o.telluric_model else None)
         self.log(source, "telluric", standard=std.name, bmag=std.bmag, vmag=std.vmag,
                  sptype=std.sptype, dairmass=st["dairmass"], vshift=st["vshift"],
                  scale=st["scale"], maxdev=st["maxdev"], rmsdev=st["rmsdev"],
                  kernel_order=o.kernel_order, normreg=o.normreg, normdegree=o.normdegree,
                  linereg=o.linereg, shifts=chosen, notes=notes)
+        return out
+
+    def _shifts(self, st, getshift, source):
+        """Per order and aperture, the shift on the first ATRAN region that gives one (or 0)."""
+        chosen, notes = {}, []
+        if not self.o.find_shift:
+            return chosen, notes
+        cands = {k: [v] for k, v in (self.o.shift_regions or {}).items()} or self.shift_regions(st)
+        for n, order in enumerate(st["objorders"]):
+            for ap in range(1, st["objnaps"] + 1):
+                for reg in cands.get(order, []):
+                    try:
+                        sh, _ = getshift(st, order, ap, srange=reg)
+                        chosen[f"{order}/{ap}"] = dict(region=reg, shift=float(sh))
+                        break
+                    except ValueError:
+                        T.set_shift(st, order, ap, 0.0)
+                else:
+                    notes.append(f"order {order}, aperture {ap}: no region gave a shift inside +-1.5 px; 0 used")
+        return chosen, notes
+
+    def _telluric_basic(self, source, std, sp, tp, out):
+        """XTELLCOR_BASIC: the target divided by a standard of any type, a blackbody restoring its continuum."""
+        b = self.o.basic_standards[std.name]
+        self.say("telluric", f"{source}: with {std.name} (not an A0 V star: divided, blackbody of {b.get('temp')} K)")
+        st = T.load_basic(sp, tp)
+        chosen, notes = self._shifts(st, T.getshift_basic, source)
+        T.tellcor_basic(st, restore=b.get("restore", True), temp=b.get("temp"), vmag=std.vmag, units=self.o.units)
+        T.write_basic(out, st, std_name=os.path.basename(sp))
+        if st.get("airmass_warning"):
+            notes.append("the standard and the target differ by more than 0.1 in airmass")
+        self.log(source, "telluric", route="xtellcor_basic", standard=std.name, temp=b.get("temp"),
+                 restore=b.get("restore", True), vmag=std.vmag, shifts=chosen, notes=notes)
+        return out
+
+    def _telluric_finish(self, source, tellfile, tp, out):
+        """XTELLCOR_FINISH: an existing telluric spectrum applied to this target."""
+        self.say("telluric", f"{source}: with the telluric spectrum {os.path.basename(tellfile)}")
+        st = T.load_finish(tellfile, tp)
+        chosen, notes = self._shifts(st, T.getshift_finish, source)
+        T.tellcor_finish(st)
+        T.write_finish(out, st)
+        if st.get("airmass_warning"):
+            notes.append("the telluric spectrum and the target differ by more than 0.1 in airmass")
+        self.log(source, "telluric", route="xtellcor_finish", telluric_file=tellfile, shifts=chosen, notes=notes)
         return out
 
     def merge(self, source):
@@ -457,8 +572,9 @@ class Reducer:
         for ap in range(1, naps + 1):
             m, used, done = M.merge_orders(spec, orders, naps=naps, aperture=ap,
                                            anchor=self.o.anchor, scales=self.o.merge_scales,
-                                           trims=self.o.merge_trims, weighted=self.o.merge_weighted,
-                                           sum_=self.o.merge_sum)
+                                           trims=self.o.merge_trims, regions=self.o.merge_regions,
+                                           nonidl_unweighted=self.o.merge_unweighted,
+                                           nonidl_sum_flux=self.o.merge_sum)
             p = out if naps == 1 else self.n.path(source, f"merged_ap{ap}")
             M.write(p, m, hdr, used, done, aperture=ap, source=os.path.basename(tp))
             results.append(p)
@@ -538,14 +654,19 @@ class Reducer:
             if nw > 1 and len(jobs) > 1:
                 self.say("extract", f"{len(jobs)} extractions on {min(nw, len(jobs))} processes")
                 entries = {x: [] for x in todo}
+                refused = {x: [] for x in todo}
                 for (x, k), res in _parallel(self, "extract_unit", jobs, nw):
-                    if isinstance(res, _Failed):
+                    if isinstance(res, _Failed) and res.message.startswith("ValueError"):
+                        refused[x].append((k, res.message))
+                    elif isinstance(res, _Failed):
                         self._fail(x, "extract", f"unit {k + 1}: {res.message}")
                     elif res[0]:
                         entries[x].append((k, res[0]))
                 for x in todo:
                     if ok(x):
-                        self._log_extract(x, [e for _, e in sorted(entries[x], key=lambda t: t[0])])
+                        left = self._guard(x, "extract", self._left_out, x, refused[x])
+                        if ok(x):
+                            self._log_extract(x, [e for _, e in sorted(entries[x], key=lambda t: t[0])], left)
             else:
                 for x in todo:
                     self._guard(x, "extract", self.extract, x)

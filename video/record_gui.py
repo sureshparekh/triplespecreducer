@@ -44,7 +44,7 @@ W, H = 1600, 1000
 
 app = QApplication([])
 # a dialog would block an offscreen window: report it instead
-for name in ("information", "warning", "critical"):
+for name in ("information", "warning", "critical", "question"):
     setattr(QMessageBox, name, staticmethod(lambda *a, **k: print("dialog:", a[2] if len(a) > 2 else a) or QMessageBox.Ok))
 
 from triplespec_reducer.gui import app as A                                 # noqa: E402

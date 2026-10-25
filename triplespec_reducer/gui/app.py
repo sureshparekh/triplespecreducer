@@ -135,7 +135,7 @@ class TSR(QMainWindow):
         self.job = None
         self.tell = {}            # science source -> telluric state (xtellcor session)
         self.merged = {}          # source -> merged spectrum
-        self.cleaned = {}
+        self.cl = None            # the open XCLEANSPEC session
         self.setWindowTitle(f"{APP_NAME}  SOAR TripleSpec 4.1")
         self.resize(1560, 980)
         self.setMinimumSize(1200, 760)
@@ -554,6 +554,8 @@ class TSR(QMainWindow):
         self.cb_flatfield.setChecked(True)
         self.cb_flatfield.setToolTip("ts4_soar.dat FLATFIELD=1")
         self._h(p.form, "cal.flatfield", self.cb_flatfield)
+        self.ed_flatname = QLineEdit("flat")
+        self._h(p.form, "cal.flatname", self.ed_flatname)
         b = button("Build the flat")
         b.clicked.connect(self._make_flat)
         bs = button("Show it", "Ghost")
@@ -585,8 +587,20 @@ class TSR(QMainWindow):
         self.sp_offset.setEnabled(False)
         self.cb_autox.toggled.connect(lambda on: self.sp_offset.setEnabled(not on))
         self._h(w.form, "cal.autox", self.cb_autox)
-        self._h(w.form, "cal.offset", self.sp_offset)
-        w.form.addRow(row(b1, b2, None))
+        bgo = button("Measure on a line", "Ghost", "XGETOFFSET: mark one line in the template, then "
+                                                   "the same line in the observed spectrum")
+        bgo.clicked.connect(self._xgetoffset)
+        self._h(w.form, "cal.offset", row(self.sp_offset, bgo, None))
+        self.seg_wctype = Segmented(["As planned", "Sky", "CuHeAr Arc"], init=0)
+        self._h(w.form, "cal.wctype", self.seg_wctype)
+        self.ed_wcframes = QLineEdit()
+        self.ed_wcframes.setPlaceholderText("blank: the target's own frames (or the arcs); or numbers, e.g. 120-131")
+        self._h(w.form, "cal.wcframes", self.ed_wcframes)
+        self.cb_shortlines = QCheckBox("Leave out lines traced on too few points (not IDL: it stops)")
+        self._h(w.form, "cal.shortlines", self.cb_shortlines)
+        bqa = button("Quality plots", "Ghost", "The _Wavecal and _Distortion plots and the rejected lines")
+        bqa.clicked.connect(self._wavecal_qa)
+        w.form.addRow(row(b1, b2, bqa, None))
         w.form.addRow(caption("Sky: a target's own OH lines, median-combined over its frames, as the "
                               "tutorial recommends (the arcs were taken hours earlier). The "
                               "standards use the solution of the target nearest in time. 'arcs' "
@@ -597,6 +611,7 @@ class TSR(QMainWindow):
         if not self.night:
             return
         self.opts.flatfield = self.cb_flatfield.isChecked()
+        self.night.flat_name = self.ed_flatname.text().strip() or "flat"
 
         def work(say):
             r = self._reducer()
@@ -632,7 +647,7 @@ class TSR(QMainWindow):
         made = os.path.exists(n.flat_path())
         self.lbl_flat.setText(wrapped(f"{len(n.flats_on)} lamps-on frames ({n.flats_on[0] if n.flats_on else '-'} to "
                               f"{n.flats_on[-1] if n.flats_on else '-'}), {len(n.flats_off)} lamps-off. "
-                              + ("Built: cal/flat.fits" if made else "Not built yet.")))
+                              + (f"Built: cal/{os.path.basename(n.flat_path())}" if made else "Not built yet.")))
         t = self.tbl_wc
         srcs = self._wavecal_sources()
         t.setRowCount(len(srcs))
@@ -663,6 +678,17 @@ class TSR(QMainWindow):
             return
 
         self.opts.wavecal_offset = None if self.cb_autox.isChecked() else self.sp_offset.value()
+        self.opts.short_lines = "skip" if self.cb_shortlines.isChecked() else "abort"
+        kind, nums = self.seg_wctype.value(), self.ed_wcframes.text().strip()
+        if selected:
+            from triplespec_reducer.instrument import fsextract_index
+            for s in srcs:
+                if kind and kind != "As planned":
+                    self.opts.wavecal_arctype = dict(self.opts.wavecal_arctype or {}, **{s: kind})
+                if nums:
+                    want = set(fsextract_index(nums))
+                    names = [f.name for f in self.night.frames if f.number in want]
+                    self.opts.wavecal_frames = dict(self.opts.wavecal_frames or {}, **{s: names})
 
         def work(say):
             r = self._reducer()
@@ -674,6 +700,64 @@ class TSR(QMainWindow):
             return srcs
 
         self.run_job(work, lambda _: (self._fill_cal(), self._show_wavecal()), label="wavelength calibrating")
+
+    def _selected_wavecal(self):
+        rows = sorted({i.row() for i in self.tbl_wc.selectedIndexes()})
+        return self._wavecal_sources()[rows[0]] if self.night and rows else None
+
+    def _wavecal_qa(self):
+        """The QA TS41CALS_MKWAVECAL leaves: the two plots, and the lines whose points were rejected."""
+        s = self._selected_wavecal()
+        if s is None:
+            QMessageBox.information(self, APP_NAME, "Select a solution first.")
+            return
+        base = self.night.wavecal_path(s)[:-5]
+        files = [base + "_Wavecal.pdf", base + "_Distortion.pdf"]
+        if not os.path.exists(files[0]):
+            QMessageBox.information(self, APP_NAME, "Calibrate it first (the plots are written with it).")
+            return
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        for f in files:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(f))
+        txt = base + "_Distortion.txt"
+        if os.path.exists(txt):
+            with open(txt) as fh:
+                QMessageBox.information(self, APP_NAME, fh.read()[:4000] or "No line had points rejected.")
+
+    def _xgetoffset(self):
+        """XGETOFFSET: one line marked in the template, then in the observed home order."""
+        s = self._selected_wavecal()
+        if s is None or not os.path.exists(self.night.flat_path()):
+            QMessageBox.information(self, APP_NAME, "Build the flat and select a solution first.")
+            return
+        from triplespec_reducer import getoffset as GO
+        r = self._reducer()
+        if s == "arcs":
+            files, kind = r._raw(self.night.arcs), "CuHeAr Arc"
+        else:
+            files, kind = r._raw(self.night.seq(s).frames), "Sky"
+        wh, fh, wo, fo, home = GO.home_spectra(files, r.flatinfo(), arctype=kind)
+        self._xgo = dict(spectra=(wh, fh, wo, fo), clicks=[])
+        self.stage.spectra([dict(series=[dict(x=wh, y=fh, color="p_fit")], ylabel="template"),
+                            dict(series=[dict(x=wo, y=fo, color="p_obs")], ylabel="observed")],
+                           f"Offset of order {home}: {s}", "drag across a line in the template, then the "
+                           "same line in the observed spectrum", xlabel="column")
+        self.stage.select_span(axis_index=0)
+
+    def _xgetoffset_span(self, lo, hi):
+        st = self._xgo
+        st["clicks"].append((lo + hi) / 2)
+        if len(st["clicks"]) == 1:
+            self.stage.select_span(axis_index=1)
+            return
+        from triplespec_reducer import getoffset as GO
+        wh, fh, wo, fo = st["spectra"]
+        off, _ = GO.xgetoffset(wh, fh, wo, fo, st["clicks"][0], st["clicks"][1])
+        self._xgo = None
+        self.cb_autox.setChecked(False)
+        self.sp_offset.setValue(float(off))
+        self.lbl_info.setText(f"offset {float(off):.4f} px, from the line at {st['clicks'][0]:.1f}")
 
     def _show_wavecal(self):
         rows = sorted({i.row() for i in self.tbl_wc.selectedIndexes()})
@@ -768,6 +852,18 @@ class TSR(QMainWindow):
         self.sp_bgd = ispin(0, 7, self.opts.psbgdeg, "PSBGDEG")
         self._h(f, "ex.background", row(label("start"), self.sp_bgs, label("width"), self.sp_bgw,
                                         label("degree"), self.sp_bgd, None))
+        self.cb_psbg = QCheckBox("Subtract the background and extract optimally")
+        self.cb_psbg.setChecked(self.opts.psbgsub)
+        self._h(f, "ex.psbg", self.cb_psbg)
+        self.sp_psf = spin(0.1, 19, self.opts.psfradius, 0.1, 2, "PSF radius, arcsec (PSPSFRAD)")
+        self._h(f, "ex.psf", self.sp_psf)
+        self.cb_medprof = QCheckBox("One median profile for the whole order")
+        self._h(f, "ex.medprofile", self.cb_medprof)
+        self.cb_sumbg = QCheckBox("Sum with the background instead (not in the IDL tool for TS4)")
+        self._h(f, "ex.sumbg", self.cb_sumbg)
+        self.ed_psorders = QLineEdit()
+        self.ed_psorders.setPlaceholderText("blank: all orders; or e.g. 3,5,6")
+        self._h(f, "ex.orders", self.ed_psorders)
         self.cb_trace = QCheckBox("Trace the apertures (otherwise keep them at the found position)")
         self.cb_trace.setChecked(True)
         self._h(f, "ex.trace", self.cb_trace)
@@ -811,6 +907,12 @@ class TSR(QMainWindow):
         self._h(g, "ex.xs_bg", self.ed_xsbg)
         self.sp_xsbgd = ispin(0, 7, self.opts.xs_bgdeg, "XSBGDEG")
         self._h(g, "ex.xs_bgdeg", self.sp_xsbgd)
+        self.ed_xsorders = QLineEdit()
+        self.ed_xsorders.setPlaceholderText("blank: all orders; or e.g. 3,5,6")
+        self._h(g, "ex.orders", self.ed_xsorders)
+        self.cb_xsbgsub = QCheckBox("XS BG Subtraction (used only without a wavecal file)")
+        self.cb_xsbgsub.setChecked(self.opts.xsbgsub)
+        self._h(g, "ex.xsbgsub", self.cb_xsbgsub)
         self.cb_xsbg = QCheckBox("Subtract the background (an option; the IDL tool never does)")
         self._h(g, "ex.xs_background", self.cb_xsbg)
         g.addRow(caption("In the IDL tool's 2D mode the extended-source background is drawn but "
@@ -820,6 +922,10 @@ class TSR(QMainWindow):
         page.add(xs)
 
         act = Plate("Run")
+        self.cb_nowc = QCheckBox("Extract in pixels, without a wavecal file")
+        self._h(act.form, "ex.nowavecal", self.cb_nowc)
+        self.sp_bdpix = spin(1, 50, self.opts.bdpixthresh, 0.5, 1, "Bad Pix Thresh (sigma)")
+        self._h(act.form, "ex.bdpix", self.sp_bdpix)
         b1 = button("Preview the first pair", "Ghost", "Profiles and apertures, nothing written")
         b1.clicked.connect(self._ex_preview)
         b2 = button("Extract every pair")
@@ -855,7 +961,29 @@ class TSR(QMainWindow):
         o.signs = [1 if c == "+" else -1 for c in t.split(",") if c] if t else None
         o.store_trace = self.cb_store.isChecked()
         o.import_trace = self.ed_itrace.text().strip() or None
+        t = self.ed_pos.text().replace(",", " ").split()
+        o.guess = [float(v) for v in t] if t else None
+        if o.findmode != "auto" and not o.guess:
+            raise ValueError("Guess and Fix need positions: type them in arcsec along the slit.")
+        o.trace = self.cb_trace.isChecked() and o.findmode != "fixed"
+        o.psbgsub = self.cb_psbg.isChecked()
+        o.optimal = False if (o.psbgsub and self.cb_sumbg.isChecked()) else None
+        o.psfradius = self.sp_psf.value()
+        o.medprofile = self.cb_medprof.isChecked()
+        orders = lambda e: [int(v) for v in e.text().replace(",", " ").split()] or None
+        o.ps_orders, o.xs_orders = orders(self.ed_psorders), orders(self.ed_xsorders)
+        o.xsbgsub = self.cb_xsbgsub.isChecked()
+        o.no_wavecal = self.cb_nowc.isChecked()
+        o.bdpixthresh = self.sp_bdpix.value()
         return o
+
+    def _ex_opts_checked(self):
+        """The settings, or None (with the reason shown) when they cannot be used."""
+        try:
+            return self._ex_opts()
+        except ValueError as e:
+            QMessageBox.information(self, APP_NAME, str(e))
+            return None
 
     def _ex_source_changed(self, *_):
         if not self.night or not self.cb_ex_src.currentText():
@@ -875,7 +1003,9 @@ class TSR(QMainWindow):
         if not self.night:
             return
         s = self.night.seq(self.cb_ex_src.currentText())
-        o = self._ex_opts()
+        o = self._ex_opts_checked()
+        if o is None:
+            return
 
         def work(say):
             from triplespec_reducer import extract as E
@@ -886,8 +1016,11 @@ class TSR(QMainWindow):
             work_img, var, _, _ = E.load_image(r._raw(s.pairs[0]), fl)
             prof = E.mkspatprof2d(work_img, fl["omask"], wc["wavecal"], wc["spatcal"],
                                   fl["slith_arc"] / fl["slith_pix"], o.ybuffer, *r.atran(), o.atmosthresh)
-            npk = o.psnaps if s.source == "point" else 1
-            pos, _ = E.findpeaks(prof, npk, mode="auto")
+            npk = (len(o.guess) if o.guess and o.findmode != "auto" else o.psnaps) if s.source == "point" else 1
+            typed = [o.guess] * len(prof) if o.guess and s.source == "point" else None
+            mode = o.findmode if s.source == "point" else "auto"
+            pos, _ = E.findpeaks(prof, npk, mode=mode, guess=typed if mode == "guess" else None,
+                                 fixed=typed if mode == "fixed" else None)
             return s, prof, pos
 
         self.run_job(work, self._ex_preview_done, label="making the profiles")
@@ -920,7 +1053,8 @@ class TSR(QMainWindow):
         if not self.night:
             return
         name = self.cb_ex_src.currentText()
-        self._ex_opts()
+        if self._ex_opts_checked() is None:
+            return
 
         def work(say):
             r = self._reducer()
@@ -960,6 +1094,21 @@ class TSR(QMainWindow):
         self.cb_scaleorder.setToolTip("XMC_SCALESPEC 'Median' over the middle 80% of this order; "
                                       "the tutorial uses order 4 or 5")
         self._h(f, "cb.scaleorder", self.cb_scaleorder)
+        self.cb_scale = QCheckBox("Scale the spectra to a common level")
+        self.cb_scale.setChecked(self.opts.scale_spectra)
+        self._h(f, "cb.scale", self.cb_scale)
+        self.seg_scalemode = Segmented(["Median", "Spectrum"], init=0)
+        self.sp_scaleref = ispin(1, 99, 1, "The spectrum the others are scaled to, for 'Spectrum'")
+        self._h(f, "cb.scalemode", row(self.seg_scalemode, self.sp_scaleref, None))
+        self.ed_scalerange = QLineEdit()
+        self.ed_scalerange.setPlaceholderText("blank: the middle 80% of the order, e.g. 1.20-1.26")
+        self._h(f, "cb.scalerange", self.ed_scalerange)
+        self.ed_prune = QLineEdit()
+        self.ed_prune.setPlaceholderText("order: spectra, e.g. 5: 2 3   (several: 5: 2; 6: 4)")
+        self._h(f, "cb.prune", self.ed_prune)
+        self.ed_pmask = QLineEdit()
+        self.ed_pmask.setPlaceholderText("order: ranges, e.g. 5: 1.30-1.32")
+        self._h(f, "cb.pixmask", self.ed_pmask)
         from triplespec_reducer.combine import STATISTICS
         self.cb_stat = QComboBox()
         self.cb_stat.addItems(STATISTICS)
@@ -971,6 +1120,8 @@ class TSR(QMainWindow):
         self._h(f, "cb.shape", self.cb_shape)
         self.cb_cbaps = QCheckBox("Combine the apertures into one (Combine apertures: Yes)")
         self._h(f, "cb.apertures", self.cb_cbaps)
+        self.cb_cbbasic = QCheckBox("Basic header (xcombspec /BASIC)")
+        self._h(f, "cb.basic", self.cb_cbbasic)
         self.lst_cb = QListWidget()
         self.lst_cb.setMinimumHeight(160)
         self._h(f, "cb.spectra", self.lst_cb)
@@ -993,6 +1144,20 @@ class TSR(QMainWindow):
         if os.path.exists(self.night.path(name, "comb")):
             self._cb_show(name)
 
+    def _cb_prune(self):
+        """The two prune fields as XCOMBSPEC_PRUNESPEC sessions, one per order (and aperture: 5/2)."""
+        out = {}
+        for text, key in ((self.ed_prune.text(), "remove"), (self.ed_pmask.text(), "regions")):
+            for part in text.split(";"):
+                if ":" not in part:
+                    continue
+                head, body = part.split(":", 1)
+                o, _, ap = head.strip().partition("/")
+                d = out.setdefault((int(o), int(ap or 1)), dict(order=int(o), aperture=int(ap or 1)))
+                d[key] = ([int(t) - 1 for t in body.replace(",", " ").split()] if key == "remove"
+                          else [tuple(r) for r in parse_ranges(body)])
+        return list(out.values())
+
     def _cb_run(self):
         if not self.night:
             return
@@ -1002,26 +1167,35 @@ class TSR(QMainWindow):
         o.statistic = self.cb_stat.currentText()
         o.combthresh = self.sp_thresh.value()
         o.correct_shapes = self.cb_shape.isChecked()
+        o.combine_apertures = self.cb_cbaps.isChecked()
+        o.combine_basic = self.cb_cbbasic.isChecked()
+        o.scale_spectra = self.cb_scale.isChecked()
+        o.scale_mode = self.seg_scalemode.value() or "Median"
+        o.scale_spectrum = self.sp_scaleref.value() - 1 if o.scale_mode == "Spectrum" else None
+        rg = parse_ranges(self.ed_scalerange.text())
+        o.scale_range = tuple(rg[0]) if rg else None
+        try:
+            o.prune = dict(o.prune or {}, **{name: self._cb_prune()})
+        except ValueError:
+            QMessageBox.information(self, APP_NAME, "Prune: 'order: spectrum numbers' and 'order: ranges'.")
+            return
         keep = [self.lst_cb.item(i).text() for i in range(self.lst_cb.count())
                 if self.lst_cb.item(i).checkState() == Qt.Checked]
 
         def work(say):
-            from triplespec_reducer import combine as C
-            files = [os.path.join(self.night.proc_dir, k) for k in keep]
-            L = C.load(files, combine_apertures=self.cb_cbaps.isChecked())
-            sc = {}
-            for ap in range(1, L["naps"] + 1):
-                sc[ap] = C.scale(L, o.scaleorder, aperture=ap)[0]
-                if o.correct_shapes:
-                    C.correct_shapes(L, aperture=ap)
-            C.combine(L, statistic=o.statistic, thresh=o.combthresh)
-            C.write(self.night.path(name, "comb"), L)
-            Reducer(self.night, o).log(name, "combine", files=keep, scaleorder=o.scaleorder,
-                                       scales={k: v.tolist() for k, v in sc.items()},
-                                       statistic=o.statistic, thresh=o.combthresh)
-            return name, L
+            r = Reducer(self.night, o, force=True)
+            r.combine(name, files=[os.path.join(self.night.proc_dir, k) for k in keep])
+            with open(self.night.path(name, "log", "json")) as fh:
+                notes = json.load(fh)["combine"].get("notes", [])
+            return name, r.loaded, notes
 
-        self.run_job(work, lambda r: self._cb_show(r[0], r[1]), label=f"combining {name}")
+        def done(res):
+            if res[2]:
+                QMessageBox.information(self, APP_NAME, "\n".join(res[2]))
+            self._update_steps()
+            self._cb_show(res[0], res[1])
+
+        self.run_job(work, done, label=f"combining {name}")
 
     def _cb_show(self, name, L=None):
         from triplespec_reducer.extract import read_spectrum
@@ -1055,14 +1229,30 @@ class TSR(QMainWindow):
         self._h(f, "tc.bv", row(self.sp_b, self.sp_v, bl, None))
         self.lbl_tc_am = caption("")
         f.addRow(self.lbl_tc_am)
+        self.seg_route = Segmented(["A0 V standard", "Other standard", "Telluric file"], init=0)
+        self._h(f, "tc.route", self.seg_route)
+        self.sp_bbtemp = spin(1000, 50000, 9500, 100, 0, "Blackbody temperature of the standard (K)")
+        self.cb_restore = QCheckBox("Restore the continuum with a blackbody")
+        self.cb_restore.setChecked(True)
+        self._h(f, "tc.basic", row(self.cb_restore, self.sp_bbtemp, None))
+        self.ed_tellfile = QLineEdit()
+        self.ed_tellfile.setPlaceholderText("a <source>_tellspec.fits written before")
+        btf = button("Browse", "Ghost")
+        btf.clicked.connect(lambda: self.ed_tellfile.setText(QFileDialog.getOpenFileName(
+            self, "A telluric spectrum", self.night.proc_dir if self.night else "", "FITS (*.fits)")[0]
+            or self.ed_tellfile.text()))
+        self._h(f, "tc.tellfile", row(self.ed_tellfile, btf))
         bload = button("Load the two spectra")
         bload.clicked.connect(self._tc_load)
-        f.addRow("", row(bload, None))
+        bdirect = button("Correct (other standard or file)", "Ghost",
+                         "XTELLCOR_BASIC or XTELLCOR_FINISH, with shifts found on ATRAN regions")
+        bdirect.clicked.connect(self._tc_direct)
+        f.addRow("", row(bload, bdirect, None))
         page.add(p)
 
         k = Plate("Kernel")
         f = k.form
-        self.seg_meth = Segmented(["Deconvolution", "IP"], init=0)
+        self.seg_meth = Segmented(["Deconvolution", "IP (not in IDL for TS4)"], init=0)
         self._h(f, "tc.method", self.seg_meth)
         self.sp_korder = ispin(3, 7, self.opts.kernel_order, "The order holding the H I line the "
                                                             "kernel is built on (Pa delta in 6)")
@@ -1071,7 +1261,7 @@ class TSR(QMainWindow):
         self.ed_norm.setToolTip("Continuum windows either side of the line (the IDL 'n' key). "
                                 "Drag on the plot with this field focused to add one.")
         self._h(f, "tc.continuum", self.ed_norm)
-        self.sp_ndeg = ispin(1, 9, self.opts.normdegree, "Fit degree of the continuum (the IDL "
+        self.sp_ndeg = ispin(1, 15, self.opts.normdegree, "Fit degree of the continuum (the IDL "
                                                          "default is 1; the tutorial uses 3)")
         self._h(f, "tc.degree", self.sp_ndeg)
         self.ed_line = QLineEdit(ranges_text([self.opts.linereg]))
@@ -1081,10 +1271,11 @@ class TSR(QMainWindow):
         self.cb_units = QComboBox()
         self.cb_units.addItems(list(UNITS))
         self._h(f, "tc.units", self.cb_units)
-        self.cb_prop = QCheckBox("Propagate the standard's uncertainty")
+        self.cb_prop = QCheckBox("Propagate the standard's uncertainty (always on in IDL)")
         self.cb_prop.setChecked(True)
         self._h(f, "tc.prop", self.cb_prop)
-        self.sp_tension = spin(0.001, 100, 10.0, 1, 3, "The spline tension of the line scales")
+        self.sp_tension = spin(0.001, 100, 10.0, 1, 3, "The spline tension of the line scales "
+                                                       "(fixed at 10 in IDL, which has no control for it)")
         self._h(f, "tc.tension", self.sp_tension)
         self.ed_vshift = QLineEdit()
         self.ed_vshift.setPlaceholderText("blank: as measured (km/s)")
@@ -1121,8 +1312,8 @@ class TSR(QMainWindow):
 
         sh = Plate("Shift")
         f = sh.form
-        self.tbl_shift = QTableWidget(0, 3)
-        self.tbl_shift.setHorizontalHeaderLabels(["order", "region (um)", "shift (pixels)"])
+        self.tbl_shift = QTableWidget(0, 4)
+        self.tbl_shift.setHorizontalHeaderLabels(["order", "aperture", "region (um)", "shift (pixels)"])
         self.tbl_shift.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.tbl_shift.verticalHeader().setVisible(False)
         self.tbl_shift.setMinimumHeight(170)
@@ -1133,6 +1324,8 @@ class TSR(QMainWindow):
         f.addRow(caption("XMC_FINDSHIFT: the telluric spectrum is shifted from -1.5 to +1.5 pixels "
                          "and the shift that leaves least structure in the region is kept. Regions "
                          "are chosen from ATRAN unless you type one."))
+        self.cb_tcmodel = QCheckBox("Also write the model (<source>_tc_modVega.fits)")
+        self._h(f, "tc.model", self.cb_tcmodel)
         bw = button("Write the corrected spectrum", "Primary")
         bw.clicked.connect(self._tc_write)
         f.addRow("", row(bw, None))
@@ -1204,6 +1397,47 @@ class TSR(QMainWindow):
 
         self.run_job(work, done, label="loading the standard and the target")
 
+    def _tc_direct(self):
+        """The two XTELLCOR routes without the kernel: XTELLCOR_BASIC or XTELLCOR_FINISH."""
+        if not self.night:
+            return
+        route = self.seg_route.value()
+        sci, stdname = self.cb_tc_src.currentText(), self.cb_tc_std.currentText()
+        o = self.opts
+        if route == "Other standard":
+            s = self.night.seq(stdname)
+            s.vmag = self.sp_v.value()
+            o.basic_standards = dict(o.basic_standards or {}, **{stdname: dict(
+                temp=self.sp_bbtemp.value(), restore=self.cb_restore.isChecked())})
+            o.telluric_from = {k: v for k, v in (o.telluric_from or {}).items() if k != sci}
+        elif route == "Telluric file":
+            if not os.path.exists(self.ed_tellfile.text()):
+                QMessageBox.information(self, APP_NAME, "Choose a telluric spectrum written before.")
+                return
+            o.telluric_from = dict(o.telluric_from or {}, **{sci: self.ed_tellfile.text()})
+        else:
+            QMessageBox.information(self, APP_NAME, "With an A0 V standard: load the two spectra and "
+                                                    "build the kernel below.")
+            return
+        o.units = self.cb_units.currentText()
+
+        def work(say):
+            out = self.night.path(sci, "tc")
+            if os.path.exists(out):             # only the correction is redone, not the combined spectra
+                os.remove(out)
+            return Reducer(self.night, o).telluric(sci)
+
+        def done(path):
+            from triplespec_reducer.extract import read_spectrum
+            self._update_steps()
+            d = read_spectrum(path)
+            series = [dict(x=d["spec"][k, 0], y=d["spec"][k, 1], color=ORDER_COLOURS[(k // d["naps"]) % 5])
+                      for k in range(d["spec"].shape[0])]
+            self.stage.spectra([dict(series=series, ylabel=o.units)], f"Telluric corrected: {sci}",
+                               os.path.basename(path))
+
+        self.run_job(work, done, label=f"correcting {sci}")
+
     def _tc_state(self):
         st = self.tell.get(self.cb_tc_src.currentText())
         if st is None:
@@ -1230,6 +1464,9 @@ class TSR(QMainWindow):
     def _span(self, lo, hi):
         """A drag on the plot: put the range where the current step wants one."""
         step = self.ws.current()
+        if getattr(self, "_xgo", None):
+            self._xgetoffset_span(lo, hi)
+            return
         if step == 4:
             if self.ed_line.hasFocus():
                 self.ed_line.setText(f"{lo:.4f}-{hi:.4f}")
@@ -1266,7 +1503,7 @@ class TSR(QMainWindow):
         o.normreg = parse_ranges(self.ed_norm.text())
         o.normdegree = self.sp_ndeg.value()
         o.linereg = parse_ranges(self.ed_line.text())[0]
-        o.tcmethod = self.seg_meth.value() or "Deconvolution"
+        o.tcmethod = (self.seg_meth.value() or "Deconvolution").split(" (")[0]
         units, tension, vs = self.cb_units.currentText(), self.sp_tension.value(), self.ed_vshift.text().strip()
         o.propstdunc = self.cb_prop.isChecked()
         ip = None                                  # chosen by slit width in conkernel
@@ -1389,15 +1626,18 @@ class TSR(QMainWindow):
         r = Reducer(self.night, self.opts)
         r._atran = (st["awave"], st["atrans"])
         cands = r.shift_regions(st)
-        self.tbl_shift.setRowCount(len(st["objorders"]))
+        naps = st["objnaps"]
+        self.tbl_shift.setRowCount(len(st["objorders"]) * naps)
         for i, o in enumerate(st["objorders"]):
             reg = (self.opts.shift_regions or {}).get(o) or (cands[o][0] if cands.get(o) else None)
-            vals = (str(o), f"{reg[0]:.4f}-{reg[1]:.4f}" if reg else "", f"{st['shift'][i, 0]:.4f}")
-            for c, v in enumerate(vals):
-                it = QTableWidgetItem(v)
-                if c == 0:
-                    it.setFlags(it.flags() & ~Qt.ItemIsEditable)
-                self.tbl_shift.setItem(i, c, it)
+            for ap in range(1, naps + 1):
+                vals = (str(o), str(ap), f"{reg[0]:.4f}-{reg[1]:.4f}" if reg else "",
+                        f"{st['shift'][i, ap - 1]:.4f}")
+                for c, v in enumerate(vals):
+                    it = QTableWidgetItem(v)
+                    if c < 2:
+                        it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                    self.tbl_shift.setItem(i * naps + ap - 1, c, it)
         self._shift_cands = cands
 
     def _tc_shifts(self):
@@ -1406,23 +1646,24 @@ class TSR(QMainWindow):
             return
         from triplespec_reducer import telluric as T
         notes = []
-        for i, o in enumerate(st["objorders"]):
-            txt = self.tbl_shift.item(i, 1).text().strip()
+        for r in range(self.tbl_shift.rowCount()):
+            o, ap = int(self.tbl_shift.item(r, 0).text()), int(self.tbl_shift.item(r, 1).text())
+            i = st["objorders"].index(o)
+            txt = self.tbl_shift.item(r, 2).text().strip()
             regs = [parse_ranges(txt)[0]] if txt else []
             regs += [c for c in self._shift_cands.get(o, []) if c not in regs]
-            for ap in range(1, st["objnaps"] + 1):
-                ok = False
-                for reg in regs:
-                    try:
-                        T.getshift(st, o, ap, srange=reg)
-                        self.tbl_shift.item(i, 1).setText(f"{reg[0]:.4f}-{reg[1]:.4f}")
-                        ok = True
-                        break
-                    except ValueError:
-                        st["shift"][i, ap - 1] = 0.0
-                if not ok:
-                    notes.append(f"order {o}: no region gave a shift inside +-1.5 px; 0 kept")
-            self.tbl_shift.item(i, 2).setText(f"{st['shift'][i, 0]:.4f}")
+            ok = False
+            for reg in regs:
+                try:
+                    T.getshift(st, o, ap, srange=reg)
+                    self.tbl_shift.item(r, 2).setText(f"{reg[0]:.4f}-{reg[1]:.4f}")
+                    ok = True
+                    break
+                except ValueError:
+                    T.set_shift(st, o, ap, 0.0)
+            if not ok:
+                notes.append(f"order {o}, aperture {ap}: no region gave a shift inside +-1.5 px; 0 kept")
+            self.tbl_shift.item(r, 3).setText(f"{st['shift'][i, ap - 1]:.4f}")
         if notes:
             QMessageBox.information(self, APP_NAME, "\n".join(notes))
 
@@ -1436,14 +1677,16 @@ class TSR(QMainWindow):
         from triplespec_reducer import telluric as T
         name = self.cb_tc_src.currentText()
         std = self.night.seq(self.cb_tc_std.currentText())
-        for i in range(self.tbl_shift.rowCount()):
+        for r in range(self.tbl_shift.rowCount()):
             try:
-                st["shift"][i, :] = float(self.tbl_shift.item(i, 2).text())
+                T.set_shift(st, int(self.tbl_shift.item(r, 0).text()), int(self.tbl_shift.item(r, 1).text()),
+                            float(self.tbl_shift.item(r, 3).text()))
             except ValueError:
                 pass
         T.corrected(st, propstdunc=self.opts.propstdunc)
+        model = self.cb_tcmodel.isChecked()
         T.write(self.night.path(name, "tc"), st, tellpath=self.night.path(name, "tellspec"),
-                std_name=std.object)
+                std_name=std.object, model=model, vegapath=self.night.path(name, "tc_modVega") if model else None)
         Reducer(self.night, self.opts).log(name, "telluric", standard=std.name, bmag=st["bmag"],
                                            vmag=st["vmag"], vshift=st["vshift"], scale=st["scale"],
                                            maxdev=st["maxdev"], rmsdev=st["rmsdev"],
@@ -1474,6 +1717,8 @@ class TSR(QMainWindow):
             for c, v in enumerate((str(o), "1.0", "", "")):
                 self.tbl_mg.setItem(r, c, QTableWidgetItem(v))
         f.addRow(self.tbl_mg)
+        self.sp_mg_ap = ispin(1, 4, 1, "The aperture whose orders are merged")
+        self._h(f, "mg.aperture", self.sp_mg_ap)
         self.ed_mg_region = QLineEdit()
         self.ed_mg_region.setPlaceholderText("drag on the plot: the region for the selected row's auto scale")
         self._h(f, "mg.region", self.ed_mg_region)
@@ -1484,7 +1729,7 @@ class TSR(QMainWindow):
         self._h(f, "mg.sum", self.cb_mgsum)
         f.addRow(caption("A scale of 1 keeps the order as it is, as the tutorial does. 'auto' scales it "
                          "to the merged spectrum over the region (XMERGEORDERS_AUTOSCALE). Rows are "
-                         "added top to bottom."))
+                         "added top to bottom; trims as 'green right 1.47; blue left 1.44'."))
         b = button("Merge")
         b.clicked.connect(self._mg_run)
         f.addRow("", row(b, None))
@@ -1506,9 +1751,13 @@ class TSR(QMainWindow):
             seq.append(o)
             s = self.tbl_mg.item(r, 1).text().strip()
             scales[o] = "auto" if s.lower() == "auto" else float(s or 1)
-            tt = self.tbl_mg.item(r, 3).text().split()
-            if len(tt) == 3:
-                trims[o] = (tt[0].capitalize(), tt[1].capitalize(), float(tt[2]))
+            cuts = []
+            for part in self.tbl_mg.item(r, 3).text().split(";"):
+                tt = part.split()
+                if len(tt) == 3:
+                    cuts.append((tt[0].capitalize(), tt[1].capitalize(), float(tt[2])))
+            if cuts:
+                trims[o] = cuts
             if scales[o] == "auto":
                 regions[o] = tuple(parse_ranges(self.tbl_mg.item(r, 2).text())[0])
         from astropy.io import fits
@@ -1518,13 +1767,22 @@ class TSR(QMainWindow):
             spec = d.astype(d.dtype.newbyteorder("="))         # MC_READSPEC: the stored type, as the pipeline
             hdr = h[0].header
         orders = [int(t) for t in str(hdr["ORDERS"]).split(",")]
-        m, used, done = M.merge_orders(spec, orders, naps=int(hdr["NAPS"]), anchor=self.sp_anchor.value(),
-                                       sequence=seq, scales=scales, trims=trims, regions=regions,
-                                       weighted=self.cb_mgw.isChecked(), sum_=self.cb_mgsum.isChecked())
-        M.write(self.night.path(name, "merged"), m, hdr, used, done,
-                source=os.path.basename(self.night.path(name, "tc")))
-        Reducer(self.night, self.opts).log(name, "merge", anchor=self.sp_anchor.value(), sequence=done,
-                                           scales=used)
+        naps, ap = int(hdr["NAPS"]), self.sp_mg_ap.value()
+        if ap > naps:
+            QMessageBox.information(self, APP_NAME, f"{name} has {naps} aperture(s).")
+            return
+        try:
+            m, used, done = M.merge_orders(spec, orders, naps=naps, aperture=ap, anchor=self.sp_anchor.value(),
+                                           sequence=seq, scales=scales, trims=trims, regions=regions,
+                                           nonidl_unweighted=not self.cb_mgw.isChecked(),
+                                           nonidl_sum_flux=self.cb_mgsum.isChecked())
+        except ValueError as e:                     # what XMERGEORDERS refuses, as it says it
+            QMessageBox.information(self, APP_NAME, str(e))
+            return
+        out = self.night.path(name, "merged" if naps == 1 else f"merged_ap{ap}")
+        M.write(out, m, hdr, used, done, aperture=ap, source=os.path.basename(self.night.path(name, "tc")))
+        Reducer(self.night, self.opts).log(name, "merge" if naps == 1 else f"merge_ap{ap}",
+                                           anchor=self.sp_anchor.value(), sequence=done, scales=used)
         for r in range(self.tbl_mg.rowCount()):
             o = int(self.tbl_mg.item(r, 0).text())
             self.tbl_mg.item(r, 1).setText(f"{used.get(o, 1.0):g}")
@@ -1543,14 +1801,25 @@ class TSR(QMainWindow):
         f = p.form
         self.cb_cl_src = self._source_combo(("science",))
         self._h(f, "cl.source", self.cb_cl_src)
+        self.cb_cl_file = QComboBox()
+        self._h(f, "cl.file", self.cb_cl_file)
+        self.sp_cl_ord = ispin(0, 7, 0, "Order (a merged spectrum has one)")
+        self.sp_cl_ap = ispin(1, 4, 1, "Aperture")
+        self._h(f, "cl.order", row(self.sp_cl_ord, self.sp_cl_ap, None))
+        self.cb_cl_src.currentTextChanged.connect(self._cl_files)
+        self.cb_cl_file.currentTextChanged.connect(lambda _: self._cl_open())
+        self.sp_cl_ord.valueChanged.connect(lambda _: self._cl_show())
+        self.sp_cl_ap.valueChanged.connect(lambda _: self._cl_show())
         self.seg_sm = Segmented(["None", "Savitzky-Golay", "Gaussian"], init=0)
         self._h(f, "cl.smoothing", self.seg_sm)
         self.sp_sgw = spin(3, 101, 3.6, 1, 1, "SG width in pixels (the IDL default, 1.5 slit widths, "
                                               "truncates to 3: no smoothing)")
-        self.sp_sgd = ispin(2, 10, 2, "SG degree")
+        self.sp_sgd = ispin(1, 10, 2, "SG degree")
         self.sp_fwhm = spin(0.5, 50, 2.4, 0.1, 2, "Gaussian FWHM in pixels (default: the slit width)")
         self._h(f, "cl.sg", row(self.sp_sgw, self.sp_sgd, None))
         self._h(f, "cl.fwhm", self.sp_fwhm)
+        self.seg_cl_type = Segmented(["Flux", "Error"], init=0)
+        self._h(f, "cl.spectype", self.seg_cl_type)
         self.ed_cl_region = QLineEdit()
         self.ed_cl_region.setPlaceholderText("drag on the plot, then Fix or Remove")
         self._h(f, "cl.region", self.ed_cl_region)
@@ -1558,78 +1827,110 @@ class TSR(QMainWindow):
         bf.clicked.connect(lambda: self._cl_edit("fix"))
         br = button("Remove", "Ghost", "Blank the region ('r')")
         br.clicked.connect(lambda: self._cl_edit("remove"))
-        bu = button("Undo all", "Ghost")
-        bu.clicked.connect(lambda: (self.cleaned.pop(self.cb_cl_src.currentText(), None), self._cl_show()))
-        f.addRow("", row(bf, br, bu, None))
-        bs = button("Smooth and save", "Primary")
+        bk = button("Keep", "Ghost", "Keep the edits so far ('s')")
+        bk.clicked.connect(lambda: self._cl_do("commit"))
+        bu = button("Undo", "Ghost", "Back to the last kept state ('u')")
+        bu.clicked.connect(lambda: self._cl_do("undo"))
+        f.addRow("", row(bf, br, bk, bu, None))
+        self.btn_cl_smooth = button("Smooth", "Ghost", "Once per file opened, from the kept spectrum")
+        self.btn_cl_smooth.clicked.connect(self._cl_smooth)
+        bs = button("Save", "Primary", "Write the kept spectrum")
         bs.clicked.connect(self._cl_save)
-        bt = button("Also write a text table", "Ghost")
+        bt = button("Also write a text table", "Ghost", "SPEX2TEXT: every order, with the header")
         bt.clicked.connect(self._cl_text)
-        f.addRow("", row(bs, bt, None))
+        f.addRow("", row(self.btn_cl_smooth, bs, bt, None))
         page.add(p)
 
-    def _cl_base(self):
-        name = self.cb_cl_src.currentText()
-        if name in self.cleaned:
-            return self.cleaned[name]
+    def _cl_files(self, name=None):
+        """The source's spectrum files XCLEANSPEC could open."""
+        name = name or self.cb_cl_src.currentText()
+        if not self.night or not name:
+            return
+        kinds = ["merged"] + [f"merged_ap{k}" for k in range(1, 5)] + ["tc", "comb"]
+        self.cb_cl_file.blockSignals(True)
+        self.cb_cl_file.clear()
+        self.cb_cl_file.addItems([k for k in kinds if os.path.exists(self.night.path(name, k))])
+        self.cb_cl_file.blockSignals(False)
+        self._cl_open()
+
+    def _cl_open(self):
+        """Open the chosen file: a new XCLEANSPEC session, its panel defaults from SLTW_PIX."""
         from triplespec_reducer import clean as CL
-        p = self.night.path(name, "merged")
-        if not os.path.exists(p):
-            return None
-        return CL.read(p)[0]
+        self.cl = None
+        kind = self.cb_cl_file.currentText()
+        if self.night and kind:
+            self.cl = CL.Session(self.night.path(self.cb_cl_src.currentText(), kind))
+            d = self.cl.defaults
+            if d:
+                self.sp_sgw.setValue(float(d["sgwin"]))
+                self.sp_sgd.setValue(int(d["sgdeg"]))
+                self.sp_fwhm.setValue(float(d["fwhm"]))
+            self.sp_cl_ord.setRange(min(self.cl.orders), max(self.cl.orders))
+            self.sp_cl_ord.setValue(self.cl.orders[0])
+            self.sp_cl_ap.setRange(1, self.cl.naps)
+            self.btn_cl_smooth.setEnabled(True)
+        self._cl_show()
+
+    def _cl_idx(self):
+        return self.cl.index(self.sp_cl_ord.value() if len(self.cl.orders) > 1 else None, self.sp_cl_ap.value())
 
     def _cl_show(self):
-        spec = self._cl_base()
-        if spec is None:
-            self.stage.message("Nothing merged yet.", "Merge the orders first.")
+        if getattr(self, "cl", None) is None:
+            self.stage.message("Nothing to clean yet.", "Merge the orders first, or write a corrected spectrum.")
             return
-        s = spec[0]
+        s = self.cl.pspec[self._cl_idx()]
         with np.errstate(divide="ignore", invalid="ignore"):
             sn = s[1] / s[2]
         self.stage.spectra([dict(series=[dict(x=s[0], y=s[1], color="p_obs")], ylabel="flux"),
                             dict(series=[dict(x=s[0], y=sn, color="p_gas")], ylabel="S/N")],
-                           f"Final spectrum: {self.cb_cl_src.currentText()}", "", heights=[3, 1])
+                           f"Clean: {self.cb_cl_src.currentText()}", os.path.basename(self.cl.path),
+                           heights=[3, 1])
         self.stage.select_span()
 
     def _cl_edit(self, what):
-        from triplespec_reducer import clean as CL
-        spec = self._cl_base()
         rg = parse_ranges(self.ed_cl_region.text())
-        if spec is None or not rg:
+        if getattr(self, "cl", None) is None or not rg:
             return
-        fn = CL.fix_region if what == "fix" else CL.remove_region
-        self.cleaned[self.cb_cl_src.currentText()] = fn(spec, 0, rg[0][0], rg[0][1])
+        fn = self.cl.fix if what == "fix" else self.cl.remove
+        fn(self._cl_idx(), rg[0][0], rg[0][1], spectype=self.seg_cl_type.value())
+        self._cl_show()
+
+    def _cl_do(self, what):
+        if getattr(self, "cl", None) is not None:
+            getattr(self.cl, what)()
+            self._cl_show()
+
+    def _cl_smooth(self):
+        method = self.seg_sm.value()
+        if getattr(self, "cl", None) is None or not method or method == "None":
+            return
+        try:
+            self.cl.smooth(method=method, sgwin=self.sp_sgw.value(), sgdeg=self.sp_sgd.value(),
+                           fwhm=self.sp_fwhm.value())
+        except (ValueError, RuntimeError) as e:     # what XCLEANSPEC refuses
+            QMessageBox.information(self, APP_NAME, str(e))
+            return
+        self.btn_cl_smooth.setEnabled(False)
         self._cl_show()
 
     def _cl_save(self):
-        from astropy.io import fits
-        from triplespec_reducer import clean as CL
-        name = self.cb_cl_src.currentText()
-        spec = self._cl_base()
-        if spec is None:
+        if getattr(self, "cl", None) is None:
             return
-        _, hdr, two_d = CL.read(self.night.path(name, "merged"))
-        method = self.seg_sm.value()
-        hist = ""
-        if method and method != "None":
-            spec, hist = CL.smooth(spec, method=method, sgwin=self.sp_sgw.value(), sgdeg=self.sp_sgd.value(),
-                                   fwhm=self.sp_fwhm.value())
-        CL.write(self.night.path(name, "clean"), spec, hdr, hist, two_d)
-        self.cleaned[name] = spec
+        name = self.cb_cl_src.currentText()
+        out = self.night.path(name, "clean")
+        self.cl.write(out)
         self._update_steps()
-        self._cl_show()
-        self.lbl_info.setText(f"wrote {self.night.path(name, 'clean')}")
+        self.lbl_info.setText(f"wrote {out}")
 
     def _cl_text(self):
-        name = self.cb_cl_src.currentText()
-        spec = self._cl_base()
-        if spec is None:
+        from triplespec_reducer import textexport as TX
+        if getattr(self, "cl", None) is None:
             return
-        p = self.night.path(name, "clean", "txt")
-        s = spec[0]
-        np.savetxt(p, np.column_stack([s[0], s[1], s[2], s[3] if s.shape[0] > 3 else 0 * s[0]]),
-                   header="wavelength_um flux_erg/s/cm2/A error flag", fmt="%.8g")
-        self.lbl_info.setText(f"wrote {p}")
+        name = self.cb_cl_src.currentText()
+        src = self.night.path(name, "clean")
+        src = src if os.path.exists(src) else self.cl.path
+        written = TX.spex2text(src)
+        self.lbl_info.setText("wrote " + ", ".join(written))
 
     # ================================================================ products
     def _products_page(self):
@@ -1706,7 +2007,7 @@ class TSR(QMainWindow):
         elif i == 5:
             self.stage.message("Merge the orders.", "Choose the scales and press Merge.")
         elif i == 6:
-            self._cl_show()
+            self._cl_files() if self.cl is None else self._cl_show()
 
     def _redraw(self):
         if hasattr(self, "ws"):
@@ -1744,7 +2045,8 @@ class TSR(QMainWindow):
         if not self.night:
             QMessageBox.information(self, APP_NAME, "Read a night first.")
             return
-        self._ex_opts()
+        if self._ex_opts_checked() is None:
+            return
         missing = [s.name for s in self.night.sequences if s.role == "standard"
                    and not (np.isfinite(s.bmag) and np.isfinite(s.vmag))]
         if missing:

@@ -53,7 +53,8 @@ for (a, b), kind in pairs:
     files = [os.path.join(RAW, f"SPEC_SO2025D-006-{n:04d}.fits") for n in (a, b)]
     op = [os.path.join(OUT, f"spectra{a:04d}.fits"), os.path.join(OUT, f"spectra{b:04d}.fits")]
     r = E.reduce_pair(files, fl, wc, op, source=kind, atran=atran, xs_positions=[20.1],
-                      flatname="flat.fits", wavecalname="wavecal_NGC134.fits")
+                      flatname="flat.fits", wavecalname="wavecal_NGC134.fits",
+                      optimal=False)          # ref_dg.pro: sum with background
     for p in r["written"]:
         ref = os.path.join(REF, os.path.basename(p))
         if os.path.exists(ref):

@@ -40,7 +40,9 @@ from triplespec_reducer.frames import read_ts4, rotate, unrotate
 
 COMBSTATS = ["Robust Weighted Mean", "Robust Mean (RMS)", "Robust Mean (Std Error)",
              "Weighted Mean", "Mean (RMS)", "Mean (Std Error)", "Median (MAD)",
-             "Median (Median Error)"]
+             "Median (Std Error)"]
+# the name this package used for the last entry before it took the IDL label
+_COMBSTAT_ALIASES = {"Median (Median Error)": "Median (Std Error)"}
 
 
 def abba_to_abab(files):
@@ -152,6 +154,7 @@ def combine_images(files, out_path, mode="A", statistic="Robust Mean (Std Error)
         say("Subtracting the sky level")
         data, var = subspecsky(data, var, flatinfo["edgecoeffs"], flatinfo["xranges"], 3)
     say("Combining")
+    statistic = _COMBSTAT_ALIASES.get(statistic, statistic)
     stat = COMBSTATS.index(statistic)
     ogb = None
     if stat == 0:

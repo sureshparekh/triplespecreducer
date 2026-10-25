@@ -22,9 +22,17 @@ A quick-look check compares the lamps-on and lamps-off levels, as the tutorial d
 Consecutive object frames with one `OBJECT` form a target. Their pointings (`RA`, `DEC`) are
 grouped (2″ tolerance):
 
-* **All within the slit length (38″) of each other**: an along-slit nod, **ABBA** — a point
-  source. Frames are paired in time order; a frame that repeats its successor's position is
-  left out with a note, as the tutorial leaves out frame 432.
+* **All within the slit length (38″) of each other**: an along-slit nod — a point source,
+  star or cluster alike. Each frame is assigned to the nearer of the two positions used most
+  (pointing jitter of a couple of arcseconds does not make a third position). Frames are
+  paired in time order; a frame that repeats its successor's position is left out with a
+  note, as the tutorial leaves out frame 432, and a last frame without a partner is left out
+  too: an **A-B-A** sequence gives one pair, as the IDL tool, which takes only an even number
+  of frames, cannot do better without using a frame twice. The pattern is read from the pairs
+  themselves: **ABBA** when every second pair is B−A, **ABAB** when all are A−B, **A-B** when
+  neither. *ABBA to ABAB* is applied to ABBA sequences only, and a sequence whose pairs do not
+  alternate regularly is never combined into one image (its pairs would cancel); it is
+  extracted pair by pair.
 * **Some farther than the slit**: those are **sky** — an extended source. Each object frame is
   paired with the sky frame nearest in time, so a sky frame can serve two object frames
   (433−434 and 435−434 in the tutorial).
@@ -42,7 +50,9 @@ are 30 s or shorter. Their B and V magnitudes and spectral type come from SIMBAD
   nearest in time; with no long exposures at all, the arcs.
 * **Telluric standard**: among the standards within 0.1 airmass of the target (xtellcor
   warns beyond that), the nearest in time; if none is that close, the nearest in airmass,
-  with a note.
+  with a note. Any other standard can be chosen in the table or on the Telluric step; a
+  standard that is not an A0 V star can be used through *Other standard* (xtellcor_basic),
+  and a telluric spectrum written before through *Telluric file* (xtellcor_finish).
 
 ## Inputs chosen during the reduction
 

@@ -19,11 +19,18 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from PySide6.QtWidgets import QApplication              # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
+from triplespec_reducer.gui import app as A             # noqa: E402
 from triplespec_reducer.gui import theme as TH          # noqa: E402
 from triplespec_reducer.gui.app import TSR              # noqa: E402
 from triplespec_reducer.night import Night              # noqa: E402
+
+# A dialog would wait for a click that never comes: its text is printed instead.
+for _name in ("information", "warning", "critical", "question"):
+    setattr(QMessageBox, _name, staticmethod(lambda *a, **k: print("dialog:", a[2] if len(a) > 2 else a)
+                                             or QMessageBox.Ok))
+A.failure_dialog = lambda parent, text, **k: print("FAILED:", text[-2000:])
 
 SRC = os.path.join(ROOT, "reduced", "2025-11-02-parallel")
 WORK = os.path.join(ROOT, "reduced", "tutorial")

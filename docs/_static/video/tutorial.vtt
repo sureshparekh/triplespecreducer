@@ -1,187 +1,184 @@
 WEBVTT
 
-00:00:00.560 --> 00:00:13.928
-In this tutorial we reduce one galaxy, NGC 134, observed with TripleSpec on the night of the second of November, 2025, from the raw frames to its final, flux-calibrated spectrum.
+00:00:00.560 --> 00:00:06.941
+Let's reduce one galaxy, NGC 134, from the raw frames to its final spectrum.
 
-00:00:13.929 --> 00:00:19.172
-Everything happens in the interface. The only things we type are two folder names.
+00:00:07.660 --> 00:00:10.606
+Open the program with the command TSR.
 
-00:00:19.993 --> 00:00:28.291
-Open the program with the command TSR. The logo shows while the reduction modules load, and then the window opens on the first step, Night.
-
-00:00:29.060 --> 00:00:35.026
+00:00:11.793 --> 00:00:17.759
 Across the top is the step bar: the seven steps of the reduction, from Night to Clean and save.
 
-00:00:34.946 --> 00:00:40.692
+00:00:17.679 --> 00:00:23.425
 The panel on the left holds the current step, and the stage on the right shows whatever the step is working on.
 
-00:00:41.427 --> 00:00:50.122
+00:00:24.160 --> 00:00:32.855
 Every step opens with a panel called About this step. It says why the step is needed, what it does in order, and what to check before moving on.
 
-00:00:50.183 --> 00:00:54.530
+00:00:32.916 --> 00:00:37.263
 Every setting below it has a caption, and a tooltip with the full explanation.
 
-00:00:55.260 --> 00:01:00.784
+00:00:37.993 --> 00:00:43.517
 First, the raw frames: type, or browse to, the folder that holds the night's files.
 
-00:01:00.844 --> 00:01:06.008
+00:00:43.577 --> 00:00:48.741
 The program only reads this folder. Nothing in it is ever written, renamed or moved.
 
-00:01:06.741 --> 00:01:14.603
+00:00:49.474 --> 00:00:57.336
 Then the output folder, where everything will be written: calibrations in a folder called cal, and spectra in a folder called proc.
 
-00:01:15.380 --> 00:01:23.509
+00:00:58.113 --> 00:01:06.242
 Leave the SIMBAD box ticked, so the standard stars' magnitudes and spectral types are looked up online, and press Read the night.
 
-00:01:24.259 --> 00:01:28.381
+00:01:06.981 --> 00:01:11.103
 Two hundred and thirty-five frames were read and sorted into ten targets.
 
-00:01:28.502 --> 00:01:42.390
+00:01:11.225 --> 00:01:25.112
 Each row is one target: whether it is science or a standard star, a point source or an extended one, its nod pattern, how many frames and pairs it has, its airmass, where its wavelength solution comes from, and the standard that will correct it.
 
-00:01:43.065 --> 00:01:54.291
+00:01:25.788 --> 00:01:36.536
 Our galaxy is NGC 134. It fills the slit, so it was nodded off the galaxy, to blank sky: an extended source, with eleven frames making seven pairs.
 
-00:01:54.392 --> 00:02:01.155
-Its standard is HD 225200, observed just before it at nearly the same airmass.
+00:01:36.656 --> 00:01:48.766
+Its standard was chosen automatically: of the standards within a tenth of its airmass, the one observed closest in time, here HD 225200, just before it. Any other can be picked in the table.
 
-00:02:01.296 --> 00:02:05.398
+00:01:48.766 --> 00:01:52.749
 Selecting the row shows its first A minus B image on the stage.
 
-00:02:06.165 --> 00:02:10.031
+00:01:53.522 --> 00:01:57.388
 Under the table, the notes report every decision that needed a judgement.
 
-00:02:10.052 --> 00:02:20.208
+00:01:57.409 --> 00:02:07.564
 Here, SIMBAD lists the standard as A1 V rather than A0 V, close enough for the method, and a second pointing on the galaxy was kept apart as a target of its own.
 
-00:02:20.965 --> 00:02:27.415
+00:02:08.322 --> 00:02:14.772
 Any cell can be changed if a decision is wrong. This plan is right, so we save it and go to the next step.
 
-00:02:28.292 --> 00:02:41.665
+00:02:15.648 --> 00:02:29.021
 Step two, Calibrate. Two calibrations come before any spectrum: the flat field, for the detector's pixel-to-pixel sensitivity, and the wavelength calibration, which gives every pixel a wavelength.
 
-00:02:42.379 --> 00:02:54.157
+00:02:29.735 --> 00:02:41.513
 Press Build the flat. Fifty lamp-on frames are combined and the lamp-off frames subtracted; the edges of the five orders are traced; and each order is divided by a smooth model of itself.
 
-00:02:54.117 --> 00:02:55.860
+00:02:41.473 --> 00:02:43.216
 This takes about half a minute.
 
-00:03:03.699 --> 00:03:11.443
+00:02:51.056 --> 00:02:58.800
 Here is the normalised flat. It is close to one inside the orders, and the fitted edges follow every order across the detector.
 
-00:03:11.483 --> 00:03:16.185
+00:02:58.840 --> 00:03:03.542
 Order seven, at the top, is short, because it runs off the detector.
 
-00:03:16.879 --> 00:03:28.883
+00:03:04.236 --> 00:03:16.240
 Below are the wavelength solutions. Each science target is calibrated on its own sky lines, the hydroxyl emission recorded in its frames; the standards borrow the solution of the target nearest in time.
 
-00:03:28.843 --> 00:03:33.525
+00:03:16.200 --> 00:03:20.882
 Select NGC 134, and press Calibrate the selected.
 
-00:03:34.246 --> 00:03:51.422
+00:03:21.602 --> 00:03:38.778
 While it runs: a sky spectrum is extracted down the middle of every order and matched to a template; the sky lines are identified, and fitted with one polynomial across all five orders; and then each line is followed along the slit, to map how the slit's image is tilted.
 
-00:03:51.443 --> 00:03:54.025
+00:03:38.799 --> 00:03:41.381
 This is the longest step, about a minute.
 
-00:04:01.865 --> 00:04:07.518
+00:03:49.221 --> 00:03:54.874
 Done: between thirty and seventy-six lines per order, and an RMS of a third of an angstrom.
 
-00:04:07.458 --> 00:04:10.044
+00:03:54.814 --> 00:03:57.400
 The stage shows the wavelength of every pixel.
 
-00:04:10.811 --> 00:04:22.309
+00:03:58.168 --> 00:04:09.666
 Step three, Extract. We start with the standard star, because a point source shows every part of extraction. The mode stays at A minus B pairs. Press Preview the first pair.
 
-00:04:30.209 --> 00:04:35.031
+00:04:17.566 --> 00:04:22.388
 These are the spatial profiles, one per order: the light along the slit.
 
-00:04:34.951 --> 00:04:39.752
+00:04:22.308 --> 00:04:27.109
 The star appears twice, positive where it sat in A, and negative in B.
 
-00:04:39.992 --> 00:04:48.855
+00:04:27.349 --> 00:04:36.212
 The green bands are the apertures, one arcsecond around each peak, and the red bands are where the leftover background is measured. They must not overlap.
 
-00:04:49.589 --> 00:04:58.282
-Press Extract every pair. Each pair is differenced, divided by the flat, traced along the order, and summed inside the apertures.
+00:04:36.966 --> 00:04:50.283
+Press Extract every pair. Each pair is differenced, divided by the flat, and traced along the order. With the background subtracted, the star is extracted optimally: its own profile weights every pixel near it.
 
-00:05:06.242 --> 00:05:11.867
+00:04:58.203 --> 00:05:03.828
 Now the galaxy. Select NGC 134, and preview its first pair.
 
-00:05:19.828 --> 00:05:25.617
+00:05:11.789 --> 00:05:17.578
 One peak: the nucleus, nineteen arcseconds along the slit, and the aperture goes there.
 
-00:05:25.638 --> 00:05:30.385
+00:05:17.599 --> 00:05:22.346
 To extract other parts of the galaxy, type their positions in the extended-source box.
 
-00:05:31.242 --> 00:05:35.591
+00:05:23.203 --> 00:05:27.552
 Extract every pair: seven pairs, about twelve seconds each.
 
-00:05:43.512 --> 00:05:56.383
+00:05:35.472 --> 00:05:48.343
 Here is one extracted spectrum, each colour one order. It is still in counts per second, and it still carries the atmosphere: the deep gaps near one point four and one point nine microns are water vapour.
 
-00:05:57.205 --> 00:06:03.875
+00:05:49.166 --> 00:05:55.836
 Step four, Combine. The spectra of a target are scaled to a common level and averaged. The standard first.
 
-00:06:04.792 --> 00:06:15.000
+00:05:56.752 --> 00:06:06.960
 The scale factors come from order five, and the spectra are combined with a robust weighted mean, which rejects outliers beyond eight sigma and weights the rest by their errors.
 
-00:06:15.120 --> 00:06:20.704
+00:06:07.080 --> 00:06:12.664
 Every spectrum is listed with a tick; untick one to leave it out. Press Combine.
 
-00:06:21.387 --> 00:06:27.465
+00:06:13.364 --> 00:06:19.442
 The grey lines are the individual spectra, and the coloured line their combination. And the same for the galaxy.
 
-00:06:31.406 --> 00:06:35.889
+00:06:23.427 --> 00:06:27.910
 Step five, the telluric correction, the heart of the reduction.
 
-00:06:35.849 --> 00:06:47.035
+00:06:27.870 --> 00:06:39.056
 The A0 V star went through the same atmosphere minutes earlier, and its true spectrum is known. So a model of it, divided by what was observed of it, is the correction for the galaxy.
 
-00:06:47.035 --> 00:06:54.520
+00:06:39.056 --> 00:06:46.541
 The target and its standard are already chosen, with the star's magnitudes from SIMBAD. Press Load the two spectra.
 
-00:06:55.266 --> 00:07:02.831
+00:06:47.287 --> 00:06:54.852
 The stage shows the star's Paschen delta line, in order six, with the continuum windows either side in green and the line in blue.
 
-00:07:02.891 --> 00:07:07.854
+00:06:54.912 --> 00:06:59.875
 Vega's model has to be blurred to match this line exactly. Press Build the kernel.
 
-00:07:08.869 --> 00:07:13.075
+00:07:00.695 --> 00:07:04.901
 Vega's line, convolved with the kernel, now lies on the star's.
 
-00:07:13.155 --> 00:07:22.689
+00:07:04.981 --> 00:07:14.515
 The caption gives the quality of the match: a maximum deviation of about two percent, and an RMS of six tenths of a percent. That is a good kernel.
 
-00:07:23.396 --> 00:07:30.898
+00:07:15.221 --> 00:07:22.723
 The telluric spectrum is now computed for every order. Each hydrogen line has a control point that scales Vega's line there.
 
-00:07:30.838 --> 00:07:38.981
+00:07:22.663 --> 00:07:30.807
 If the correction showed a bump at a line, we would lower its scale; a dip, raise it. Here it is smooth, and nothing needs changing.
 
-00:07:39.696 --> 00:07:48.544
+00:07:31.521 --> 00:07:40.369
 Press Find every shift. The correction is slid by fractions of a pixel, order by order, to line up with the galaxy's own absorption features.
 
-00:07:49.336 --> 00:07:55.638
+00:07:41.161 --> 00:07:47.463
 And press Write the corrected spectrum. The galaxy is now in physical flux units, with the atmosphere removed.
 
-00:07:56.409 --> 00:08:03.897
+00:07:48.235 --> 00:07:55.723
 Step six, Merge: the five orders are joined into one spectrum, with order three as the anchor. Press Merge.
 
-00:08:05.049 --> 00:08:11.089
+00:07:56.875 --> 00:08:02.915
 The orders meet without a step, because the telluric correction has already put them on one flux scale.
 
-00:08:11.862 --> 00:08:20.393
+00:08:03.688 --> 00:08:12.154
 Step seven, Clean and save. The stage shows the final spectrum and its signal to noise: one to two hundred per pixel, in the bands.
 
-00:08:20.554 --> 00:08:25.660
-Smoothing is optional. We leave it off, and press Smooth and save to write the final file.
+00:08:12.315 --> 00:08:17.038
+Smoothing is optional. We leave it off, and press Save to write the final file.
 
-00:08:26.442 --> 00:08:37.096
+00:08:18.002 --> 00:08:28.656
 Finally, the Products page. Type a source's name, and every file made for it is listed, with its header, and the log of every step: the settings used, and what came out.
 
-00:08:37.811 --> 00:08:44.260
+00:08:29.370 --> 00:08:35.819
 Everything we did step by step, the button Reduce everything does for the whole night at once.
 
-00:08:44.321 --> 00:08:49.168
+00:08:35.880 --> 00:08:40.727
 And that is one galaxy, reduced from the raw frames to a calibrated spectrum.

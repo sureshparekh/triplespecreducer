@@ -64,8 +64,9 @@ SCENES = [
     dict(id="extract", lines=[
         "Now extraction. For every pair, B is subtracted from A and the result divided by the flat.",
         "A spatial profile shows where the light falls along the slit. Apertures are placed on the "
-        "target, the light left between them is fitted as background and removed, and the flux inside "
-        "each aperture is summed, at every wavelength."]),
+        "target, and the light left between them is fitted as background and removed.",
+        "A star is then measured optimally: its own profile weights every pixel near it, giving the "
+        "whole star's flux at the best signal to noise. An extended source is summed inside its apertures."]),
     dict(id="combine", lines=[
         "The spectra of one target are then combined. They are first scaled to a common level, because "
         "the seeing and the guiding change during a sequence.",

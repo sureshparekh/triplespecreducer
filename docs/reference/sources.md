@@ -48,7 +48,9 @@ The overlap of each pixel with the extraction polygons.
 **Horne (1986).** Horne, K. 1986, "An Optimal Extraction Algorithm for CCD Spectroscopy", *PASP*,
 98, 609–617. [doi:10.1086/131801](https://doi.org/10.1086/131801)
 
-Listed only to say that optimal extraction is *not* used: the TripleSpec module supports aperture (summed) extraction only.
+The profile-weighted ("optimal") extraction of point sources, which the Spextool manual cites
+for it. The TS4_SOAR README advises the aperture sum, but its interface switches optimal
+extraction on whenever the point-source background is subtracted, the default.
 
 ## The instrument
 

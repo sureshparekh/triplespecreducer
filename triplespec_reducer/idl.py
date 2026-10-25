@@ -154,14 +154,15 @@ def median(a, even=False, axis=None):
     """
     IDL MEDIAN(array, /EVEN, DIMENSION=d), the keywords optional.
 
-    NaNs are ignored. An even number of values gives the upper middle one
-    unless `even`, in which case the two middle values are averaged. `axis`
-    is the numpy axis that IDL's DIMENSION collapses.
+    NaNs are ignored; infinities are sorted with the other values, as IDL
+    does. An even number of values gives the upper middle one unless
+    `even`, in which case the two middle values are averaged. `axis` is
+    the numpy axis that IDL's DIMENSION collapses.
     """
     P = np.float32 if isf32(a) else np.float64
     a = np.asarray(a, dtype=float)
     if axis is None:
-        v = np.sort(a[np.isfinite(a)].ravel())
+        v = np.sort(a[~np.isnan(a)].ravel())
         n = v.size
         if n == 0:
             return P(np.nan)
@@ -169,7 +170,7 @@ def median(a, even=False, axis=None):
             return P(v[n // 2])
         return P(0.5 * (v[n // 2 - 1] + v[n // 2]))
     s = np.sort(a, axis=axis)                       # NaNs sort to the end
-    n = np.sum(np.isfinite(a), axis=axis)
+    n = np.sum(~np.isnan(a), axis=axis)
     hi = np.take_along_axis(s, np.expand_dims(n // 2, axis), axis=axis)
     hi = np.squeeze(hi, axis=axis)
     if not even:
@@ -188,13 +189,17 @@ def median_filter(img, width):
 
     Pixels closer than width/2 to an edge are returned unchanged, as IDL
     does. The box median of an odd number of values needs no /EVEN rule.
+    A 1-D even width w (probed in IDL 7.1) takes x[i-w/2 : i+w/2-1] for
+    i = w/2 ... n-1-w/2, NaNs ignored, the upper middle of an even count.
     """
     from numpy.lib.stride_tricks import sliding_window_view
     img = np.asarray(img, dtype=float)
     out = img.copy()
     h = width // 2
     if img.ndim == 1:
-        win = sliding_window_view(img, width)
+        if img.size - 2 * h <= 0:
+            return out
+        win = sliding_window_view(img, width)[:img.size - 2 * h]
         out[h:img.size - h] = median(win, axis=-1)
         return out
     win = sliding_window_view(img, (width, width))
@@ -206,13 +211,14 @@ def median_filter(img, width):
 # ---------------------------------------------------------------- lookups
 
 def value_locate(xarr, x):
-    """IDL VALUE_LOCATE for a monotonic (either direction) vector."""
+    """IDL VALUE_LOCATE for a monotonic (either direction) vector; a NaN gives -1 (probed)."""
     xarr = np.asarray(xarr, dtype=float)
     x = np.asarray(x, dtype=float)
     if xarr[-1] >= xarr[0]:
-        return np.searchsorted(xarr, x, side="right") - 1
-    idx = np.searchsorted(-xarr, -x, side="right") - 1
-    return idx
+        idx = np.searchsorted(xarr, x, side="right") - 1
+    else:
+        idx = np.searchsorted(-xarr, -x, side="right") - 1
+    return np.where(np.isnan(x), -1, idx)
 
 
 def _is_double(*a):
@@ -703,8 +709,8 @@ def poly_fit1d(x, y, order, yerr=None, goodbad=None, want_covar=False):
     Spextool POLY_FIT1D, the GAUSSJ branch every caller here uses.
 
     Order 0 is MC_MEANCOMB of the values with no weights (TOTAL(/DOUBLE)/n
-    and IDL's one-pass variance). FINDGEN exponents: pow(). As in the IDL,
-    GOODBAD indexes the NaN-filtered values with positions in the full
+    and IDL's one-pass variance, both returned as FLOAT). FINDGEN
+    exponents: pow(). As in the IDL, GOODBAD indexes the NaN-filtered values with positions in the full
     arrays, and the errors are not filtered by it.
     """
     x = np.asarray(x, dtype=float)
@@ -719,11 +725,12 @@ def poly_fit1d(x, y, order, yerr=None, goodbad=None, want_covar=False):
             xx, yy = xx[g], yy[g]
             ee = ee[:xx.size]
     if order == 0:
+        # MC_MEANCOMB returns its mean and variance as FLOAT: [FLOAT, 0.]
         cnt = yy.size
         mean = itotal(yy) / cnt
         var = (itotal(sq(yy)) - cnt * sq(mean)) / (cnt - 1) / cnt if cnt > 1 else np.nan
-        coeffs = np.array([mean, 0.0])
-        covar = np.array([var, 0.0])
+        coeffs = np.array([mean, 0.0], dtype=np.float32)
+        covar = np.array([var, 0.0], dtype=np.float32)
         return (coeffs, covar) if want_covar else coeffs
     n = order + 1
     alpha = np.zeros((n, n))
@@ -1272,7 +1279,9 @@ def convol(a, kernel, scale=None, edge_truncate=False):
     is not reversed. Without /EDGE_TRUNCATE the result is zero within K/2
     of either end; with it, the array is extended by repeating its end
     values. As IDL computes it: a running sum over the kernel in the
-    precision of the array.
+    precision of the array. Kernel elements equal to zero are skipped, as
+    IDL skips them (probed in IDL 7.1: with [0, 1, 0] a NaN next to a pixel
+    does not reach it).
     """
     P = np.float32 if isf32(a) else np.float64
     a = np.asarray(a).astype(P)
@@ -1284,12 +1293,16 @@ def convol(a, kernel, scale=None, edge_truncate=False):
         pad = np.concatenate([np.full(h, a[0]), a, np.full(nk - 1 - h, a[-1])]).astype(P)
         acc = np.zeros(n, dtype=P)
         for j in range(nk):
+            if k[j] == 0:
+                continue
             acc = (acc + pad[j:j + n] * k[j]).astype(P)
         out = acc
     elif n >= nk:
         m = n - nk + 1
         acc = np.zeros(m, dtype=P)
         for j in range(nk):
+            if k[j] == 0:
+                continue
             acc = (acc + a[j:j + m] * k[j]).astype(P)
         out[h:h + m] = acc
     if scale is not None:
@@ -1583,7 +1596,19 @@ def fxcard(key, value, comment="", fmt=None):
         else:
             val = value.replace("'", "''")
             if len(val) > 68:
-                return None
+                # FXADDPAR_CONTPAR: 67 characters and '&' per record, the
+                # rest on CONTINUE records; the comment follows the first
+                # record's value and is cut at column 80
+                recs = [("".join(h[:10]) + "'" + val[:67] + "&'" + " /" + comment)[:80].ljust(80)]
+                rest = val[67:]
+                while rest:
+                    if len(rest) > 68:
+                        recs.append(("CONTINUE  '" + rest[:67] + "&'").ljust(80))
+                        rest = rest[67:]
+                    else:
+                        recs.append(("CONTINUE  '" + rest + "'").ljust(80))
+                        rest = ""
+                return fits.Card.fromstring("".join(recs))
             if len(val) > 18:
                 img = "".join(h[:10]) + "'" + val + "'" + " /" + comment
                 return fits.Card.fromstring(img[:80].ljust(80))
@@ -1613,7 +1638,25 @@ def fxaddpar(header, key, value, comment="", fmt=None):
         del header[i]
         header.insert(i, card)
     else:
-        header.append(card)
+        # a new keyword goes before the first blank, COMMENT or HISTORY
+        # record (FXPARPOS BEFORE=''/'COMMENT'/'HISTORY'), else at the end
+        pos = [n for n, c in enumerate(header.cards) if c.keyword in ("", "COMMENT", "HISTORY")]
+        if pos:
+            header.insert(pos[0], card)
+        else:
+            header.append(card, useblanks=False, bottom=True)
+    if len(card.image) > 80 and "LONGSTRN" not in header:
+        # FXADDPAR_CONTWARN: LONGSTRN and four COMMENTs before the keyword
+        from astropy.io import fits
+        at = header.index(key)
+        warn = [fxcard("LONGSTRN", "OGIP 1.0", " The OGIP long string convention may be used.")]
+        for t in (" This FITS file may contain long string keyword values that are",
+                  " continued over multiple keywords.  This convention uses the  '&'",
+                  " character at the end of a string which is then continued",
+                  " on subsequent keywords whose name = 'CONTINUE'."):
+            warn.append(fits.Card.fromstring(("COMMENT " + t).ljust(80)))
+        for n, c in enumerate(warn):
+            header.insert(at + n, c)
 
 
 def fxpar(header, key):
@@ -1681,12 +1724,17 @@ def addhistlabel(header, label):
     here it is a standard blank-keyword card holding the same text.
     """
     tot = (80 - (len(label) + 2)) // 2
-    header.add_blank(" ")
-    header.add_blank("#" * tot + " " + label + " " + "#" * tot)
-    header.add_blank(" ")
+    # SXADDHIST /BLANK puts ' '+text in an 80-character record: 79 characters kept
+    for t in (" ", ("#" * tot + " " + label + " " + "#" * tot)[:79], " "):
+        header.append(("", t), useblanks=False, bottom=True)   # SXADDHIST: before END
+
+
+def addhistory(header, line):
+    """SXADDHIST (or FXADDPAR 'HISTORY') of one line: a HISTORY record just before END."""
+    header.append(("HISTORY", line), useblanks=False, bottom=True)
 
 
 def sxaddhist(header, text, length=70):
-    """MC_SPLITTEXT then SXADDHIST: the text as HISTORY lines."""
+    """MC_SPLITTEXT then SXADDHIST: the text as HISTORY lines, at the end of the header."""
     for line in splittext(text, length):
-        header.add_history(line)
+        addhistory(header, line)

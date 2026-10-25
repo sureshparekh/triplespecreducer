@@ -221,6 +221,29 @@ FIELDS = {
         default="on (ts4_soar.dat FLATFIELD=1)",
         details="Every frame is divided by the normalised flat before extraction, which removes "
                 "the pixel-to-pixel sensitivity differences of the detector."),
+    "cal.flatname": dict(
+        label="Flat name",
+        caption="The flat's file name in cal/ (xspextool's Output Flat Name).",
+        default="flat",
+        details="A different name keeps more than one flat for the night, e.g. one per flat set."),
+    "cal.wctype": dict(
+        label="Calibrate on",
+        caption="For the selected solutions: as planned, the sky's OH lines, or the CuHeAr arc lines.",
+        default="As planned",
+        details="xspextool leaves the choice of frames and line list free; the plan uses each "
+                "target's own sky, and the arcs only when no target has long enough exposures."),
+    "cal.wcframes": dict(
+        label="Frames",
+        caption="For the selected solutions: the frames to calibrate on, as frame numbers.",
+        details="Blank uses all of the target's frames (or all the arcs). Any list may be given, "
+                "e.g. part of a sequence, as in xspextool's Wavecal Images field."),
+    "cal.shortlines": dict(
+        label="Short lines",
+        caption="Leave out a line traced on too few points instead of stopping.",
+        default="off",
+        details="Spextool stops the whole calibration when a line along the slit has fewer than "
+                "two points (its POLY_FIT fails). On, such a line is left out and listed: this is "
+                "not what the IDL tool does."),
     "cal.autox": dict(
         label="Find the offset automatically (Auto X-Correlate)",
         caption="The spectrum is cross-correlated with the stored template.",
@@ -233,7 +256,10 @@ FIELDS = {
         label="Offset (px)",
         caption="Used only when the automatic offset is off.",
         details="The shift, in pixels, between this night's spectrum and the template, in "
-                "order 4. Find it by comparing one line in both."),
+                "order 4. 'Measure on a line' finds it as XGETOFFSET does: drag across a line in "
+                "the template, then across the same line in the observed spectrum; each is fitted "
+                "with a Gaussian on a straight line, and the offset is the difference of the two "
+                "centres."),
     # ------------------------------------------------------------ 3. extract
     "ex.source": dict(
         label="Source",
@@ -260,7 +286,8 @@ FIELDS = {
     "ex.cisky": dict(
         label="Subtract the sky level column by column first",
         caption="Removes any sky left in each order before combining.",
-        details="The median of each column inside each order is subtracted."),
+        details="In each column of each order, the robust weighted mean of the pixels (outliers "
+                "beyond 3 sigma left out) is subtracted (MC_SUBSPECSKY)."),
     "ex.naps": dict(
         label="Apertures",
         caption="2 for one point source in an A-B pair (its positive and negative image).",
@@ -291,6 +318,53 @@ FIELDS = {
         details="The difference image still holds a little sky. It is fitted across the slit "
                 "with a polynomial of this degree in the background region on either side of "
                 "the aperture, and subtracted before summing."),
+    "ex.psbg": dict(
+        label="Background",
+        caption="Subtract the background around each aperture, and extract optimally.",
+        default="on",
+        details="As in the IDL tool, where PSBGSUB=1 also switches optimal extraction on: each "
+                "wavelength's spatial profile, fitted along the order, weights the pixels within "
+                "the PSF radius (Horne 1986), and the flux of the whole profile is returned. Off "
+                "gives a plain sum inside the aperture, with no background."),
+    "ex.psf": dict(
+        label="PSF radius",
+        caption="Radius in arcsec over which the profile is fitted for optimal extraction.",
+        default="2.2 (PSPSFRAD)",
+        details="The aperture radius must not be larger than it."),
+    "ex.medprofile": dict(
+        label="Median profile",
+        caption="Use one median profile for the whole order instead of a profile that changes "
+                "along it.",
+        default="off",
+        details="xspextool's Median Profile."),
+    "ex.sumbg": dict(
+        label="Sum with background",
+        caption="Keep the background but sum the aperture instead of extracting optimally.",
+        default="off",
+        details="Not available in the IDL tool for TripleSpec, where background subtraction "
+                "always comes with optimal extraction; results have no IDL counterpart."),
+    "ex.orders": dict(
+        label="Orders",
+        caption="Extract only these orders, e.g. 3,5,6; blank for all.",
+        default="all",
+        details="xspextool's PS Orders and XS Orders."),
+    "ex.nowavecal": dict(
+        label="No wavelength calibration",
+        caption="Extract in pixels, without a wavecal file (xspextool with a blank Full Wavecal Name).",
+        default="off",
+        details="The spectra are then in pixels, the bad-pixel mask and the threshold below are "
+                "used, and the extended-source background is subtracted when its switch is on."),
+    "ex.bdpix": dict(
+        label="Bad pixel threshold",
+        caption="Sigma for replacing bad pixels, when extracting without a wavecal file.",
+        default="7 (BADPIXELTHRESH)",
+        details=""),
+    "ex.xsbgsub": dict(
+        label="XS background",
+        caption="Extended-source background subtraction, as xspextool's XS BG Subtraction.",
+        default="on (XSBGSUB=1)",
+        details="Only takes effect without a wavecal file: with one, the IDL tool never subtracts "
+                "it (see the option below)."),
     "ex.trace": dict(
         label="Trace the apertures",
         caption="Follows the spectrum along the order; off keeps a fixed position.",
@@ -314,10 +388,11 @@ FIELDS = {
     "ex.trace_settings": dict(
         label="Trace settings",
         caption="Step and columns summed, fit degree, window and minimum significance.",
-        default="step 5, columns 5, degree 1, window 3.0, min sigma 0.1",
+        default="step 5, columns 5, degree 1, window 3.0, min sigma 0",
         details="The trace samples the profile every `step` columns, summing `columns` columns, "
                 "fits each peak, rejects points further than `window` pixels or fainter than "
-                "`min sigma`, and fits the rest with a polynomial of `degree`."),
+                "`min sigma`, and fits the rest with a polynomial of `degree`. The instrument "
+                "file's min sigma, 0.1, is read by the IDL tool as an integer: 0."),
     "ex.xs_positions": dict(
         label="Positions",
         caption="Aperture centres in arcsec; blank uses the profile's peak.",
@@ -354,6 +429,37 @@ FIELDS = {
         default="5",
         details="Pick an order with good signal and little telluric absorption; the tutorial "
                 "uses 4 or 5."),
+    "cb.scale": dict(
+        label="Scale the spectra",
+        caption="Bring the spectra to a common level before combining (XCOMBSPEC 'Scale Spectra').",
+        default="on, as in the tutorial",
+        details="Off combines them as extracted, as XCOMBSPEC does when Scale is never pressed; "
+                "the history then says nothing about scaling."),
+    "cb.scalemode": dict(
+        label="Scale to",
+        caption="The median spectrum, or one chosen spectrum (its number in the list).",
+        default="Median",
+        details="XMC_SCALESPEC's 'Scale to'. The reference spectrum must not be left out."),
+    "cb.scalerange": dict(
+        label="Scale range",
+        caption="The wavelengths the scale factors are measured over.",
+        default="the middle 80% of the order",
+        details="XMC_SCALESPEC's 's' selection."),
+    "cb.prune": dict(
+        label="Leave out of an order",
+        caption="Spectra to drop from one order only, e.g. '5: 2 3' (numbers as listed).",
+        details="XCOMBSPEC's prune step (XMC_MASKSPEC). For another aperture: '5/2: 1'. As in "
+                "XCOMBSPEC, the unweighted means then still divide by the full number of spectra, "
+                "and the median repeats the last one; the program reproduces this."),
+    "cb.pixmask": dict(
+        label="Mask ranges",
+        caption="Wavelength ranges masked in one order, e.g. '5: 1.30-1.32'.",
+        details="XMC_MASKSPEC's region mask: those pixels of every kept spectrum are ignored."),
+    "cb.basic": dict(
+        label="Basic header",
+        caption="Write the shorter header of xcombspec /BASIC.",
+        default="off",
+        details=""),
     "cb.statistic": dict(
         label="Statistic",
         caption="How the spectra are combined at each wavelength.",
@@ -387,7 +493,7 @@ FIELDS = {
         caption="The science target to correct.",
         details="Its combined spectrum is corrected."),
     "tc.standard": dict(
-        label="A0 V standard",
+        label="Standard",
         caption="The star used to measure the atmosphere and response.",
         details="Chosen in the plan as the closest in time and airmass; change it here."),
     "tc.bv": dict(
@@ -395,6 +501,30 @@ FIELDS = {
         caption="The standard's magnitudes: they set the flux scale.",
         details="Vega's model is scaled to the V magnitude and reddened by B-V. Look up fills "
                 "them from SIMBAD."),
+    "tc.route": dict(
+        label="Correct with",
+        caption="An A0 V star (xtellcor), a star of another type (xtellcor_basic), or a telluric "
+                "spectrum written before (xtellcor_finish).",
+        default="A0 V standard",
+        details="A0 V: Vega's model, convolved with a kernel from the star's own line, gives the "
+                "atmosphere and the flux scale. Other standard: the target is divided by the star "
+                "and, optionally, multiplied by a blackbody at its temperature scaled to its V. "
+                "Telluric file: an existing <source>_tellspec.fits is applied, with its own shift."),
+    "tc.basic": dict(
+        label="Blackbody",
+        caption="For another standard: restore its continuum with a blackbody of this temperature.",
+        default="on",
+        details="Scaled to the V magnitude above. Off leaves the plain ratio of target to star."),
+    "tc.tellfile": dict(
+        label="Telluric file",
+        caption="For the telluric-file route: the telluric spectrum to apply.",
+        details="Its standard's name, magnitudes and airmass are carried into the header; a "
+                "difference of more than 0.1 in airmass is reported."),
+    "tc.model": dict(
+        label="Model",
+        caption="Also write the convolved, scaled Vega model (XTELLCOR 'Model').",
+        default="off",
+        details=""),
     "tc.method": dict(
         label="Method",
         caption="Deconvolution builds the kernel from the star's own line.",
@@ -402,7 +532,8 @@ FIELDS = {
         details="Deconvolution derives the convolution kernel from a hydrogen line of the star "
                 "(recommended). IP uses a stored instrument profile, available only for 0.3, "
                 "0.5, 0.8, 1.6 and 3.0 arcsec slits; for TripleSpec's 1.1 arcsec slit the IDL "
-                "tool stops, and so does this one."),
+                "tool stops, and so does this one. The IDL tool does not offer IP for TS4 at all: "
+                "its Method buttons are only shown for SpeX."),
     "tc.order": dict(
         label="Order",
         caption="The order holding the H I line the kernel is built on.",
@@ -431,12 +562,14 @@ FIELDS = {
         label="Propagate the standard's uncertainty",
         caption="The standard's noise is added to the target's errors.",
         default="on",
-        details="Off keeps only the target's own noise."),
+        details="Off keeps only the target's own noise. IDL has no such switch: it always "
+                "propagates."),
     "tc.tension": dict(
         label="Tension",
         caption="Stiffness of the spline joining the line scales.",
         default="10",
-        details="Higher tension gives straighter segments between the control points."),
+        details="Higher tension gives straighter segments between the control points. IDL has "
+                "no control for it: it is always 10."),
     "tc.vshift": dict(
         label="Vega velocity",
         caption="Blank: as measured. Or type a velocity in km/s.",
@@ -455,7 +588,7 @@ FIELDS = {
         details="For a feature in the telluric spectrum that should not be there."),
     "tc.shift": dict(
         label="Shift",
-        caption="Fraction-of-a-pixel shifts that best align the correction.",
+        caption="Fraction-of-a-pixel shifts that best align the correction, per order and aperture.",
         details="The telluric spectrum is shifted from -1.5 to +1.5 pixels and the shift that "
                 "leaves least structure in the region is kept."),
     # ------------------------------------------------------------ 6. merge
@@ -470,26 +603,51 @@ FIELDS = {
         details="Its flux level is kept; the others are added to it in turn."),
     "mg.table": dict(
         label="Orders",
-        caption="Order, scale (a number or 'auto'), region for auto, trims.",
+        caption="Order, scale (a number or 'auto'), region for auto, trims; added top to bottom.",
         details="A scale of 1 keeps the order as it is. 'auto' scales it to the merged spectrum "
-                "over the region. A trim, e.g. 'green right 1.85', cuts the order or the merged "
-                "spectrum at a wavelength."),
+                "over the region, found before any trim, as XMERGEORDERS does. A trim cuts the "
+                "order being added (Green) or the merged spectrum (Blue) at a wavelength, e.g. "
+                "'green right 1.47'; one of each, separated by ';', may be given. Each order must "
+                "be next to the orders merged so far, as XMERGEORDERS offers only those."),
     "mg.region": dict(
         label="Region",
         caption="Drag on the plot: the region for the selected row's auto scale.",
-        details=""),
+        details="XMERGEORDERS has no default region: 'auto' without one is refused."),
+    "mg.aperture": dict(
+        label="Aperture",
+        caption="Which aperture's orders are merged.",
+        default="1",
+        details="Each aperture is merged on its own. With one aperture the file is "
+                "<source>_merged.fits; with several, <source>_merged_ap<n>.fits."),
     "mg.weighted": dict(
         label="Weight the overlap by the errors",
         caption="The overlap is the error-weighted mean of the two orders.",
         default="on",
-        details="Off gives the plain mean."),
+        details="Off is not available in Spextool 4.1: its XMERGEORDERS stops on an undefined "
+                "variable, so the plain mean it gives here has no IDL counterpart."),
     "mg.sum": dict(
         label="Sum the overlap instead of averaging",
-        caption="For spectra whose orders split the flux.",
+        caption="For spectra whose orders split the flux. Not in Spextool 4.1.",
         default="off",
-        details=""),
+        details="XMERGEORDERS 4.1 switches weighting off for a sum and then stops on the same "
+                "undefined variable, so a sum has no IDL counterpart."),
     # ------------------------------------------------------------ 7. clean
-    "cl.source": dict(label="Source", caption="The merged target to clean.", details=""),
+    "cl.source": dict(label="Source", caption="The target whose spectrum is cleaned.", details=""),
+    "cl.file": dict(
+        label="File",
+        caption="Which of its spectra: merged, one aperture's merged, corrected, or combined.",
+        default="merged",
+        details="XCLEANSPEC opens any Spextool spectrum file."),
+    "cl.order": dict(
+        label="Order, aperture",
+        caption="The spectrum of the file that is shown and edited.",
+        details="A merged file has one spectrum; a corrected or combined one has one per order "
+                "and aperture."),
+    "cl.spectype": dict(
+        label="Edit",
+        caption="Fix or remove the flux and its error together, or the error only.",
+        default="Flux",
+        details="XCLEANSPEC's spectrum type: 'Error' changes only the uncertainties."),
     "cl.smoothing": dict(
         label="Smoothing",
         caption="None, Savitzky-Golay (keeps line shapes) or Gaussian.",
@@ -498,17 +656,20 @@ FIELDS = {
     "cl.sg": dict(
         label="Width, degree",
         caption="Savitzky-Golay window in pixels and polynomial degree.",
-        default="1.5 slit widths (3.6 px, which truncates to 3: no change), degree 2",
-        details="The window must be wider than the degree."),
+        default="1.5 slit widths (from the file's SLTW_PIX: 3.6 px, which truncates to 3: no change), degree 2",
+        details="The degree must be smaller than the window (XCLEANSPEC refuses it otherwise)."),
     "cl.fwhm": dict(
         label="FWHM",
         caption="Gaussian full width at half maximum, in pixels.",
-        default="the slit width (2.4 px)",
+        default="the slit width (the file's SLTW_PIX, 2.4 px)",
         details=""),
     "cl.region": dict(
         label="Region",
-        caption="Drag on the plot, then Fix (straight line) or Remove (NaN).",
-        details=""),
+        caption="Drag on the plot, then Fix (straight line) or Remove (NaN); Keep makes the edits "
+                "stick, Undo goes back to the last Keep.",
+        details="As in XCLEANSPEC ('f', 'r', 's', 'u'), edits are drawn on a working copy: only "
+                "kept edits are smoothed and written. Smoothing is allowed once per file opened, "
+                "and starts from the kept spectrum."),
 }
 
 

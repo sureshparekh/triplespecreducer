@@ -12,6 +12,12 @@ Spectral extraction: what xspextool does once the calibrations exist.
                                                     every (lambda, slit) cell
     the file                 MC_WRITESPEC
 
+Point sources are extracted optimally by default, as the TS4_SOAR panel
+does: ts4_soar.dat greys out the 'Optimal' box (OPTIMALEXTRACTION=0 0),
+but the startup 'PS BG Subtraction' event (PSBGSUB=1) ticks it, so
+XSPEXTOOL_PSEXTRACTSPEC hands MC_EXTSPEC2D the PSF radius and the spatial
+map. Unticking BG subtraction gives a plain sum with no background.
+
 Extended sources: in the IDL, MC_EXTSPEC2D asks MC_MKAPMASK1D for the
 background regions as XSBGINFO=xsbgino (a misspelling of xsbginfo), and
 XSPEXTOOL_XSEXTRACTSPEC passes BGDEG=bgorder where the degree was read into
@@ -21,6 +27,7 @@ is reproduced by default. `xs_background=True` applies them exactly as the
 point-source path does -- the subtraction Spextool was written to make.
 """
 
+import math
 import os
 
 import numpy as np
@@ -28,6 +35,7 @@ from astropy.io import fits
 
 from triplespec_reducer import idl as I
 from triplespec_reducer.frames import read_ts4
+from triplespec_reducer.instrument import fsextract_index
 
 try:
     from numba import njit
@@ -74,8 +82,50 @@ def load_image(files, flatinfo, mode="A-B", sky=None, flatfield=True, errorprop=
     return data.astype(np.float32), var.astype(np.float32), hdrs, itot
 
 
+def load_bitmask(files, flatinfo, mode="A-B", sky=None, combined=None, lincormax=80000):
+    """
+    The linearity bitmask XSPEXTOOL_LOADIMAGES keeps (KNA_READTS4FITS'
+    BITINFO {lincormax, bit 0}): bit 0 set where a raw frame exceeds
+    LINCORMAX (the LONG 80000), OR-ed over the pair; from a combined image
+    its 3rd extension; A-Sky adds the sky's. Only the 1D extraction uses it.
+    """
+    from triplespec_reducer.combineimgs import read_combined
+    from triplespec_reducer.frames import _read_one, rotate
+    rot = flatinfo["rotation"]
+    lim = np.float64(lincormax)                       # DOUBLE(bitinfo.lincormax)
+    if combined:
+        return read_combined(combined, rot)[2]
+    n = 2 if mode == "A-B" else 1
+    m = np.zeros(1, dtype=np.uint8)
+    for f in files[:n]:
+        img = _read_one(f)[0]
+        m = m | (img > lim).astype(np.uint8)
+    m = rotate(m, rot)
+    if mode == "A-Sky":
+        m = m | read_combined(sky, rot)[2]
+    return m
+
+
+def load_bdpxmask(rotation):
+    """xspextool's bad pixel mask: BADPIXMASK (fakebmask.fits) as BYTE, rotated."""
+    from triplespec_reducer._paths import INSTRUMENT_DIR
+    from triplespec_reducer.frames import rotate
+    m = fits.getdata(os.path.join(INSTRUMENT_DIR, "fakebmask.fits"))
+    return rotate(m.astype(np.uint8), rotation)
+
+
+def _strtrim(v):
+    """STRTRIM(v,2) of a number, in IDL's default format: DOUBLE %#.8g, FLOAT %#.6g."""
+    return f"{float(v):#.8g}" if not I.isf32(np.asarray(v)) else f"{float(v):#.6g}"
+
+
 def write_trace(path, orders, naps, tracecoeffs, obsmode="XD"):
-    """The trace file XSPEXTOOL_PSTRACESPEC writes to cal/."""
+    """
+    The trace file XSPEXTOOL_PSTRACESPEC writes to cal/: the selected
+    orders, and each coefficient as STRTRIM prints it (a traced, DOUBLE
+    fit to 8 significant figures; the FLTARR of Use Ap Positions to 6).
+    """
+    tracecoeffs = np.asarray(tracecoeffs)
     with open(path, "w") as fh:
         fh.write(f"OBSMODE={obsmode}\n")
         fh.write("ORDERS=" + ",".join(str(o) for o in orders) + "\n")
@@ -83,22 +133,22 @@ def write_trace(path, orders, naps, tracecoeffs, obsmode="XD"):
         k = 0
         for o in orders:
             for j in range(naps):
-                fh.write(f"ORDER{o:02d}_AP{j + 1:02d}= " + "  ".join(repr(float(c)) for c in tracecoeffs[k]) + "\n")
+                fh.write(f"ORDER{o:02d}_AP{j + 1:02d}= " +
+                         "  ".join(_strtrim(c) for c in tracecoeffs[k]) + "\n")
                 k += 1
 
 
 def read_trace(path):
-    """MC_READTRACE."""
-    d = {}
-    with open(path) as fh:
-        for line in fh:
-            if "=" in line:
-                k, v = line.split("=", 1)
-                d[k.strip()] = v.strip()
-    orders = [int(t) for t in d["ORDERS"].split(",")]
-    naps = int(d["NAPS"])
-    tc = [[float(t) for t in d[f"ORDER{o:02d}_AP{j + 1:02d}"].split()] for o in orders for j in range(naps)]
-    return orders, naps, np.array(tc)
+    """
+    MC_READTRACE: the orders the file lists, the number of apertures, and
+    the coefficients as FLOAT() reads them, one row per order and aperture
+    in the file's order.
+    """
+    lines = [ln for ln in open(path).read().splitlines() if "=" in ln]
+    orders = fsextract_index(lines[1].split("=", 1)[1])
+    naps = int(lines[2].split("=", 1)[1].strip())
+    tc = [[np.float32(t) for t in ln.split("=", 1)[1].split()] for ln in lines[3:]]
+    return orders, naps, np.array(tc, dtype=np.float32)
 
 
 # ------------------------------------------------------------- profiles
@@ -138,7 +188,7 @@ def _order_grid(omask, wavecal, spatcal, order, ds):
 
 
 def mkspatprof2d(img, omask, wavecal, spatcal, ds, ybuffer, wtrans=None,
-                 ttrans=None, atmosthresh=None, orders=None):
+                 ttrans=None, atmosthresh=None, orders=None, coeffs=False):
     """
     MC_MKSPATPROF2D: the mean spatial profile of each order.
 
@@ -147,28 +197,112 @@ def mkspatprof2d(img, omask, wavecal, spatcal, ds, ybuffer, wtrans=None,
     transmits less than `atmosthresh` are blanked; the profile is the
     median along wavelength, normalized by the sum of its absolute values.
     Returns {order: (ygrid, profile)}.
+
+    With `coeffs`, also SPATCOEFFS and MEDSPATCOEFFS, the spatial maps
+    optimal extraction rebuilds the profile from at every wavelength:
+    returns (profiles, spatcoeffs, medspatcoeffs), the last two
+    {order: (ygrid, c)} with c an FLTARR [ny, 5] (IDL [5, ny]).
     """
     orders = orders or sorted(int(o) for o in np.unique(omask) if o != 0)
-    out = {}
+    out, spat, med = {}, {}, {}
     for o in orders:
         xgrid, ygrid, ix, iy, _ = _order_grid(omask, wavecal, spatcal, o, ds)
         rect = I.interpolate2d(img, ix, iy, cubic=-0.5, missing=np.nan)
         ny = ygrid.size
         ygrid = ygrid[ybuffer:ny - ybuffer]
+        if I.isf32(spatcal) and I.isf32(wavecal):
+            # MC_SIMWAVECAL2D's FLOAT images (no wavecal file): TRIGRID's LIMITS
+            # and so its YGRID are FLOAT (a DOUBLE wavecal makes them DOUBLE)
+            ygrid = ygrid.astype(np.float32)
         rect = rect[ybuffer:ny - ybuffer, :]
         bg = I.median(rect, axis=0)
         rect = rect - bg[None, :]
         if wtrans is not None:
             mask = np.ones(xgrid.size, dtype=np.float32)            # FLTARR
             rtrans = I.linterp(wtrans, ttrans, xgrid, missing=1)
-            mask[rtrans < atmosthresh] = np.nan
+            # ATMOSTHRESH comes from its widget as a FLOAT
+            mask[rtrans < np.float32(atmosthresh)] = np.nan
             rect = rect * mask[None, :]
         prof = I.median(rect, axis=1)
         a = np.abs(prof)
         prof = (prof / I.ftotal(a[np.isfinite(a)])).astype(np.float32)   # TOTAL(/NAN), float
         # IDL keeps [[ygrid],[prof]]: DOUBLE, so the slit grid keeps its precision.
         out[o] = (ygrid, prof)
-    return out
+        if coeffs:
+            spat[o], med[o] = _spatcoeffs(xgrid, ygrid, rect, prof)
+    return (out, spat, med) if coeffs else out
+
+
+def _spatcoeffs(xgrid, ygrid, rect, prof, ndeg=4):
+    """
+    The SPATCOEFFS / MEDSPATCOEFFS part of MC_MKSPATPROF2D.
+
+    The rectified order (atmosphere mask applied) is divided by the mean
+    profile, each wavelength scaled by its median (/EVEN) along the slit,
+    and every slit row then fitted along wavelength with a robust degree-4
+    polynomial (5 sigma, GAUSSJ). A row the fit refuses gets NaNs, as
+    IDL's CANCEL branch gives it. MEDSPATCOEFFS keep only the constant
+    term: the mean profile itself.
+    """
+    ny = ygrid.size
+    with np.errstate(divide="ignore", invalid="ignore"):
+        norms = I.median(rect / prof[:, None], even=True, axis=0)     # / meanmap, DIMENSION=2
+        rect = rect / norms[None, :]
+    c = np.zeros((ny, ndeg + 1), dtype=np.float32)                   # FLTARR
+    for j in range(ny):
+        try:
+            cj, _ = I.robustpoly1d(xgrid, rect[j], ndeg, 5, 0.1)
+        except (ValueError, np.linalg.LinAlgError):
+            cj = np.full(ndeg + 1, np.nan)
+        c[j] = cj
+    a = np.zeros((ny, ndeg + 1), dtype=np.float32)
+    a[:, 0] = prof
+    return (ygrid, c), (ygrid, a)
+
+
+def _sinc_weights(xa, x, dampfac=3.25, ksize=21):
+    """
+    The part of MC_SINCINTERP that depends only on the abscissae: for every
+    x, its TABINV index, and the damped-sinc kernel and the (edge-clamped)
+    table indices it multiplies. In double, as the IDL computes it (FINDGEN
+    minus a DOUBLE fraction; !PI is the FLOAT pi; EXP and SIN the libm
+    double functions). Optimal extraction interpolates every wavelength of
+    an order on the same slit grid, so these are made once per order.
+    """
+    import math
+    idx = np.atleast_1d(I.tabinv(xa, x)).astype(np.float64)
+    ix = np.trunc(idx).astype(np.int64)                              # FIX
+    fx = idx - ix
+    nf = np.asarray(xa).size
+    pi32 = float(np.float32(np.pi))
+    base = np.arange(ksize, dtype=np.float32) - np.float32(10)       # FINDGEN(ksize)-10
+    w = np.zeros((idx.size, ksize))
+    for p in np.where(fx != 0)[0]:
+        for k in range(ksize):
+            xk = float(base[k]) - float(fx[p])
+            u1 = xk / dampfac
+            u2 = pi32 * xk
+            w[p, k] = math.exp(-(u1 * u1)) * math.sin(u2) / u2
+    lobe = np.clip(np.arange(ksize)[None, :] - 10 + ix[:, None], 0, nf - 1)
+    return ix, fx, w, lobe
+
+
+def _sinc_apply(weights, ya):
+    """MC_SINCINTERP's sums for one table of values: TOTAL(sinc*vals), in order."""
+    ix, fx, w, lobe = weights
+    f = np.asarray(ya)
+    vals = f[lobe].astype(np.float32)                                # FLTARR(ksize)
+    r = np.zeros(ix.size, dtype=w.dtype)                             # xx*0: TABINV's type
+    for k in range(w.shape[1]):
+        r = (r + w[:, k] * vals[:, k]).astype(w.dtype)
+    z = fx == 0
+    r[z] = f[ix[z]]
+    return r
+
+
+def sincinterp(xa, ya, x):
+    """MC_SINCINTERP: damped-sinc interpolation of the table (xa, ya) at x."""
+    return _sinc_apply(_sinc_weights(xa, x), ya)
 
 
 def findpeaks(profiles, npeaks, doorders=None, mode="auto", guess=None, fixed=None):
@@ -185,14 +319,17 @@ def findpeaks(profiles, npeaks, doorders=None, mode="auto", guess=None, fixed=No
     for i, o in enumerate(orders):
         if not doorders[i]:
             continue
-        # The IDL profile is [[ygrid],[prof]]: DOUBLE.
-        x, p = np.asarray(profiles[o][0], float), np.asarray(profiles[o][1], float)
+        # The IDL profile is [[ygrid],[prof]]: DOUBLE, unless the slit grid
+        # is FLOAT (no wavecal file), and the fits are made in that type.
+        P = np.float32 if I.isf32(np.asarray(profiles[o][0])) else np.float64
+        x, p = np.asarray(profiles[o][0]).astype(P), np.asarray(profiles[o][1]).astype(P)
         if mode == "guess":
             y = p - I.median(p, even=True)
             for j in range(npeaks):
                 xpix = I.tabinv(x, guess[i][j])
                 _, fit = I.mpfitpeak(x, y, nterms=4, estimates=np.array(
-                    [y[I.itrunc(xpix)], guess[i][j], 0.5, 0], dtype=float))
+                    [y[I.itrunc(xpix)], guess[i][j], 0.5, 0], dtype=P))
+                fit = fit.astype(P)                   # MPFITPEAK's A: the data's type
                 positions[i, j] = np.float32(fit[1])
                 xpix = I.tabinv(x, fit[1])
                 apsign[i, j] = 1 if y[I.itrunc(xpix)] > 0 else -1
@@ -204,7 +341,8 @@ def findpeaks(profiles, npeaks, doorders=None, mode="auto", guess=None, fixed=No
             for j in range(npeaks):
                 k = int(np.argmax(y))
                 _, fit = I.mpfitpeak(xx, y, nterms=4,
-                                     estimates=np.array([y[k], xx[k], 1, 0], dtype=float))
+                                     estimates=np.array([y[k], xx[k], 1, 0], dtype=P))
+                fit = fit.astype(P)
                 positions[i, j] = np.float32(fit[1])
                 # IDL looks the sign up in the unfiltered profile with an
                 # index found on the NaN-filtered abscissa; kept as written.
@@ -287,7 +425,11 @@ def tracespec2d(image, wavecal, spatcal, edgecoeffs, xranges, appos, step,
 
 
 def tracetoap2d(omask, wavecal, spatcal, tracecoeffs, naps, orders, doorders=None):
-    """MC_TRACETOAP2D: an aperture's path back on the detector, for display."""
+    """
+    MC_TRACETOAP2D: an aperture's path back on the detector, for display,
+    and its mean slit position (MEAN of the DOUBLE trace, kept in a FLOAT
+    array), which Import Trace takes as the aperture position.
+    """
     nrows, ncols = omask.shape
     yy, xx = np.mgrid[0:nrows, 0:ncols]
     doorders = [1] * len(orders) if doorders is None else doorders
@@ -304,7 +446,7 @@ def tracetoap2d(omask, wavecal, spatcal, tracecoeffs, naps, orders, doorders=Non
             tr = I.poly(wave, tracecoeffs[l])
             (ix, iy), _ = I.trigrid_points(wavecal[z], spatcal[z],
                                            [xx[z].astype(float), yy[z].astype(float)], wave, tr)
-            out.append(dict(order=o, aperture=j + 1, x=ix, y=iy, appos=float(np.mean(tr))))
+            out.append(dict(order=o, aperture=j + 1, x=ix, y=iy, appos=np.float32(I.itotal(tr) / tr.size)))
             l += 1
     return out
 
@@ -319,7 +461,8 @@ def mkapmask1d(slit, positions, apradius, psbginfo=None, xsbginfo=None):
     limits go through one TABINV call (it works element by element), and the
     mask is then written in the IDL's order.
     """
-    slit = np.asarray(slit, dtype=float)
+    slit = np.asarray(slit)
+    slit = slit.astype(np.float32 if I.isf32(slit) else np.float64)   # 1D slits are FLOAT
     npix = slit.size
     naps = len(positions)
     f32 = np.float32
@@ -497,19 +640,50 @@ def _cell_sums(px, py, img, var):
     return flx, vr
 
 
+def _idlmax(a, b):
+    """IDL's a > b (maximum): b where a is NaN."""
+    return np.where(a > b, a, b)
+
+
+def _idlmin(a, b):
+    """IDL's a < b (minimum): a where a is NaN."""
+    return np.where(a > b, b, a)
+
+
 def extspec2d(img, var, omask, orders, wavecal, spatcal, ds, apsign, tracecoeffs,
-              apradii, psbginfo=None, xsbginfo=None, bgdeg=None):
+              apradii, psbginfo=None, xsbginfo=None, bgdeg=None, psfradius=None,
+              smapinfo=None):
     """
-    MC_EXTSPEC2D (sum extraction; optimal extraction is off for TS4).
+    MC_EXTSPEC2D: sum or optimal extraction.
 
     Each order is cut into cells of one resampled wavelength step by `ds`
     arcsec; every cell's flux is the exact-area sum of the pixels under it.
     The background fit, when asked for, is a robust polynomial of degree
     `bgdeg` across the slit at each wavelength, its uncertainty added to
     the variance. Returns {(order, aperture): [wave, flux, error]}.
+
+    Without `psfradius` the flux is the sum over the aperture (fractional
+    weights at its ends). With `psfradius` and `smapinfo` (one (ygrid,
+    coeffs) pair per extracted order, from mkspatprof2d's SPATCOEFFS or
+    MEDSPATCOEFFS) it is the optimal estimate xspextool makes for TS4 point
+    sources: the profile is rebuilt at each wavelength from the spatial
+    map, sinc-interpolated onto the slit, scaled to the slit with a robust
+    linear fit whose 6-sigma rejects are left out, forced to the aperture's
+    sign, normalized within the PSF radius, and the flux is the
+    variance-weighted mean of data/profile over the aperture.
     """
+    optext = bool(psfradius)                         # KEYWORD_SET(PSFRADIUS)
+    if smapinfo is not None and not optext:
+        # 'Fix Bad Pixels' (FIXBADPIXELS=0 0): insensitive for TS4
+        raise ValueError("A spatial map without a PSF radius (Fix Bad Pixels) is not "
+                         "available for TS4_SOAR.")
+    if optext and (smapinfo is None or bgdeg is None):
+        # xspextool switches optimal extraction on only with PS BG Subtraction,
+        # and always hands it the spatial map.
+        raise ValueError("Optimal extraction needs the spatial map and the background fit.")
     nrows, ncols = img.shape
     naps = apradii.shape[1]
+    f32 = np.float32
     out = {}
     for i, o in enumerate(orders):
         xgrid, ygrid, ix, iy, dw = _order_grid(omask, wavecal, spatcal, o, ds)
@@ -548,12 +722,24 @@ def extspec2d(img, var, omask, orders, wavecal, spatcal, ds, apsign, tracecoeffs
                               for j in range(nw)], dtype=np.float32)       # FLTARR
         imgf = np.ascontiguousarray(img, dtype=np.float32)
         varf = np.ascontiguousarray(var, dtype=np.float32)
+        if optext:
+            # The spatial map: every slit row's polynomial evaluated on the
+            # output wavelengths (DOUBLE POLY stored in an FLTARR).
+            yarc, cmap = smapinfo[i]
+            cmap = np.asarray(cmap)
+            spatmap = np.zeros((nw, cmap.shape[0]), dtype=f32)
+            for r in range(cmap.shape[0]):
+                spatmap[:, r] = I.poly(owave, cmap[r])
+            sincw = _sinc_weights(yarc, slit_arc)
+            psfr = np.full(naps, psfradius, dtype=f32)              # REPLICATE(psfradius,naps)
         for j in range(nw):
             px = np.stack([ix[j, 0:ns], ix[j, 1:ns + 1], ix[j + 1, 1:ns + 1], ix[j + 1, 0:ns]], axis=1) + 0.5
             py = np.stack([iy[j, 0:ns], iy[j, 1:ns + 1], iy[j + 1, 1:ns + 1], iy[j + 1, 0:ns]], axis=1) + 0.5
             slit_flx, slit_var = _cell_sums(px.astype(np.float64), py.astype(np.float64), imgf, varf)
             slitmask = mkapmask1d(slit_arc, trace_arc[j], apradii[i], psbginfo=psbginfo,
                                   xsbginfo=xsbginfo)
+            if optext:
+                psfmask = mkapmask1d(slit_arc, trace_arc[j], psfr)
             if bgdeg is not None:
                 z = np.where((slitmask == -1.0) & (slit_var[:ns] != 0))[0]
                 if z.size >= 2:
@@ -563,6 +749,31 @@ def extspec2d(img, var, omask, orders, wavecal, spatcal, ds, apsign, tracecoeffs
                     # FLOAT minus the DOUBLE fit: the slit stays double, as in IDL
                     slit_flx = slit_flx[:ns] - bg
                     slit_var = slit_var[:ns] + yvar
+            if optext:
+                # Without a background fit at this wavelength the IDL slit
+                # stays ny long and ROBUSTPOLY1D pairs it with an ns-long
+                # profile; the ns values that exist are used here.
+                sflx, svar = slit_flx[:ns], slit_var[:ns]
+                sprofile = _sinc_apply(sincw, spatmap[j])
+                _, ogoodbad = I.robustpoly1d(sprofile, sflx, 1, 6, 0.1)
+                for k in range(naps):
+                    zpsf = (psfmask > f32(k)) & (psfmask <= f32(k + 1))
+                    ps_ = sprofile[zpsf]
+                    # enforce the aperture's sign (IDL's > and < operators)
+                    ps_ = _idlmax(ps_, 0.0) if apsign[k] == 1 else _idlmin(ps_, 0.0)
+                    ps_ = apsign[k] * np.abs(ps_ / I.itotal(ps_[np.isfinite(ps_)]))
+                    sprofile[zpsf] = ps_
+                    zs = ((slitmask > f32(k)) & (slitmask <= f32(k + 1)) &
+                          (sprofile != 0.0) & (ogoodbad == 1))
+                    if zs.any():
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            flux = sflx[zs] / sprofile[zs]
+                            fvar = svar[zs] / I.sq(sprofile[zs])
+                            m, v, _ = I.meancomb(flux, datavar=fvar)
+                        ofspec[j, k], ovspec[j, k] = m, v
+                    else:
+                        ofspec[j, k] = ovspec[j, k] = np.nan
+                continue
             for k in range(naps):
                 z = (slitmask > np.float32(k)) & (slitmask <= np.float32(k + 1))
                 w = (slitmask[z] - np.float32(k)).astype(np.float32)
@@ -572,6 +783,329 @@ def extspec2d(img, var, omask, orders, wavecal, spatcal, ds, apsign, tracecoeffs
                 ovspec[j, k] = tot(slit_var[:ns][z] * I.sq(w)) if z.any() else 0.0
         for k in range(naps):
             out[(o, k + 1)] = np.array([owave, ofspec[:, k], np.sqrt(ovspec[:, k])])
+    return out
+
+
+# ------------------------------------------------------------- 1D (no wavecal file)
+
+@njit(cache=True)
+def _sinc_kernel(fx, dampfac, pi32):
+    """MC_SINCINTERP's damped sinc for each fractional offset (DOUBLE, libm exp/sin)."""
+    n = fx.shape[0]
+    w = np.zeros((n, 21))
+    for p in range(n):
+        if fx[p] == 0.0:
+            continue
+        for k in range(21):
+            xk = np.float64(np.float32(k) - np.float32(10)) - fx[p]
+            u1 = xk / dampfac
+            u2 = pi32 * xk
+            w[p, k] = math.exp(-(u1 * u1)) * math.sin(u2) / u2
+    return w
+
+
+@njit(cache=True)
+def _sinc_kernel32(fx, dampfac, pi32):
+    """The same in FLOAT (both abscissae FLOAT): expf, sinf, every step rounded."""
+    n = fx.shape[0]
+    w = np.zeros((n, 21), dtype=np.float32)
+    for p in range(n):
+        if fx[p] == np.float32(0):
+            continue
+        for k in range(21):
+            xk = np.float32(np.float32(np.float32(k) - np.float32(10)) - fx[p])
+            u1 = np.float32(xk / dampfac)
+            u2 = np.float32(pi32 * xk)
+            e = np.float32(math.exp(np.float32(-np.float32(u1 * u1))))
+            sn = np.float32(math.sin(u2))
+            w[p, k] = np.float32(np.float32(e * sn) / u2)
+    return w
+
+
+def _sinc_weights_fast(xa, x, dampfac=3.25, ksize=21):
+    """
+    _sinc_weights with the kernel loop compiled: the 1D extraction needs one
+    per column. There the table and the slit are both FLOAT, so TABINV and
+    the whole kernel are single precision.
+    """
+    single = I.isf32(np.asarray(xa)) and I.isf32(np.asarray(x))
+    idx = np.atleast_1d(I.tabinv(xa, x))
+    ix = np.trunc(idx).astype(np.int64)
+    if single:
+        fx = (idx.astype(np.float32) - ix.astype(np.float32)).astype(np.float32)
+        w = _sinc_kernel32(fx, np.float32(dampfac), np.float32(np.pi))
+    else:
+        fx = idx.astype(np.float64) - ix
+        w = _sinc_kernel(fx, float(dampfac), float(np.float32(np.pi)))
+    nf = np.asarray(xa).size
+    lobe = np.clip(np.arange(ksize)[None, :] - 10 + ix[:, None], 0, nf - 1)
+    return ix, fx, w, lobe
+
+
+def _moments_goodbad(data, igoodbad, robust):
+    """
+    MC_MOMENTS' OGOODBAD with ROBUST (the moments themselves unused here).
+    As written, the flags of the points kept are set in a count_initgood
+    array at their positions in the full data (GOOD_BAD[Z[GOODDATAS]]),
+    out-of-range subscripts clipped to the last element, and that array is
+    then copied back onto the initially good points.
+    """
+    d = np.asarray(data)
+    gb = np.array(igoodbad, dtype=np.int64).copy()
+    gb[~np.isfinite(d)] = 2
+    z = np.where(gb == 1)[0]
+    if z.size <= 1:
+        raise ValueError("mc_moments: fewer than two good points")
+    dz = d[z]
+    med = I.median(dz, even=True)
+    P = np.float32 if I.isf32(d) else np.float64
+    mad = P(np.float32(1.482) * I.median(np.abs(dz - med), even=True))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        good = np.where(np.abs((dz - med) / mad) <= robust)[0]
+    if good.size == 0:
+        good = np.arange(dz.size)
+    good_bad = np.zeros(z.size, dtype=np.int64)
+    good_bad[np.minimum(z[good], z.size - 1)] = 1
+    gb[z] = good_bad
+    return gb
+
+
+def _nantrim2(a):
+    """MC_NANTRIM(array, 2): drop the leading and trailing NaNs (and zeros)."""
+    a = np.asarray(a, dtype=float)
+    c = np.cumsum(np.where(np.isnan(a), 0.0, a))
+    if not np.isnan(a).any():
+        return np.arange(a.size)
+    lo = int(np.where(c != 0)[0][0])
+    cr = np.cumsum(np.where(np.isnan(a[::-1]), 0.0, a[::-1]))
+    hi = a.size - 1 - int(np.where(cr != 0)[0][0])
+    return np.arange(lo, hi + 1)
+
+
+def _sqrt_store(v):
+    """SQRT(TOTAL(...)) stored in an FLTARR: a FLOAT root, or a DOUBLE root rounded."""
+    return np.sqrt(v) if I.isf32(np.asarray(v)) else np.float32(np.sqrt(np.float64(v)))
+
+
+def _spatmap1d(owave, spatcoeffs_i):
+    yarc, c = spatcoeffs_i
+    c = np.asarray(c)
+    smap = np.zeros((owave.size, c.shape[0]), dtype=np.float32)
+    for r in range(c.shape[0]):
+        smap[:, r] = I.poly(owave, c[r])
+    return yarc, smap
+
+
+def extpsspec(image, var, wavecal, edgecoeffs, tracecoeffs, naps, xranges, slith_arc,
+              apradii, apsign, psfwidth=None, spatcoeffs=None, bgorder=None, psbginfo=None,
+              bdpxmask=None, bitmask=None, bdpixthresh=7.0):
+    """
+    MC_EXTPSSPEC: the SpeX-type point-source extraction xspextool uses when
+    there is no wavecal file. Every detector column of an order is one
+    output pixel (the 'wavelength' is the column number); the slit is the
+    column's pixels between the order edges, in arcsec by linear scaling.
+    With the background, a robust fit (5 sigma MC_MOMENTS clip, then
+    ROBUSTPOLY1D) over the background pixels is subtracted. With
+    `psfwidth` (and the spatial map) the flux is the optimal estimate, bad
+    pixels found by a `bdpixthresh`-sigma fit of the profile; otherwise the
+    sum. A 4th row carries the flags: 1 linearity, 8 optimal extraction
+    failed. Returns a list, one {aperture: [4, n]} per order.
+    """
+    nrows, ncols = image.shape
+    f32 = np.float32
+    optextract = psfwidth is not None
+    fixbdpx = spatcoeffs is not None and not optextract
+    if fixbdpx:
+        raise ValueError("Fix Bad Pixels (FIXBADPIXELS=0 0) is not available for TS4_SOAR.")
+    if bdpxmask is None:
+        bdpxmask = np.ones(image.shape, dtype=np.int16)
+    linmask = (np.asarray(bitmask) & 1) if bitmask is not None else np.zeros(image.shape, np.uint8)
+    y = np.arange(nrows, dtype=np.float32)
+    apradii = np.asarray(apradii, dtype=f32)
+    out = []
+    for i in range(len(xranges)):
+        start, stop = int(xranges[i][0]), int(xranges[i][1])
+        x = np.arange(stop - start + 1, dtype=f32) + f32(start)
+        bot = I.poly(x, edgecoeffs[i][0])
+        top = I.poly(x, edgecoeffs[i][1])
+        owave = wavecal[I.itrunc((bot + top) / 2.), I.itrunc(x)]
+        n = owave.size
+        ofspec = np.full((n, naps), np.nan, dtype=f32)
+        oespec = np.full((n, naps), np.nan, dtype=f32)
+        obspec = np.zeros((n, naps), dtype=f32)
+        trace = np.zeros((n, naps), dtype=f32)
+        for j in range(naps):
+            trace[:, j] = I.poly(owave, tracecoeffs[i * naps + j])
+        pixtoarc = np.zeros((n, 2), dtype=f32)
+        pixtoarc[:, 1] = np.float64(f32(slith_arc)) / (top - bot)
+        pixtoarc[:, 0] = -1. * (pixtoarc[:, 1] * bot)
+        if optextract:
+            yarc, spatmap = _spatmap1d(owave, spatcoeffs[i])
+            psfr = np.full(naps, psfwidth, dtype=f32)
+        for j in range(n):
+            if top[j] > nrows - 0.5 or bot[j] < -0.5:
+                continue
+            b, t, c = I.itrunc(bot[j]), I.itrunc(top[j]), I.itrunc(x[j])
+            slity_arc = I.poly(y[b:t + 1], pixtoarc[j])
+            slitz = image[b:t + 1, c]
+            vslitz = var[b:t + 1, c]
+            bdpxmkz = np.asarray(bdpxmask[b:t + 1, c]).astype(np.int64)
+            linmkz = linmask[b:t + 1, c]
+            mask = mkapmask1d(slity_arc, trace[j], apradii, psbginfo=psbginfo)
+            if optextract:
+                psfmask = mkapmask1d(slity_arc, trace[j], psfr)
+            if bgorder is not None:
+                z = np.where((mask == -1) & (vslitz != 0.0))[0]
+                if z.size >= 2:
+                    og = _moments_goodbad(slitz[z], bdpxmkz[z], 5)
+                    coeff, _, cvar = I.robustpoly1d(slity_arc[z], slitz[z], bgorder, 4, 0.1,
+                                                    yerr=np.sqrt(vslitz[z]), igoodbad=og,
+                                                    want_covar=True)
+                    bg, yvar = I.poly1d(slity_arc, coeff, cvar)
+                    slitz = slitz - bg
+                    vslitz = vslitz + yvar
+            if optextract:
+                sprofile = _sinc_apply(_sinc_weights_fast(yarc, slity_arc), spatmap[j])
+                bdpx = bdpxmkz.copy()
+                _, ogoodbad = I.robustpoly1d(sprofile, slitz, 1, bdpixthresh, 0.1, igoodbad=bdpx)
+                # ROBUSTPOLY1D marks the NaNs 2 in the IGOODBAD array it is given
+                bdpx[~(np.isfinite(sprofile) & np.isfinite(slitz))] = 2
+            for k in range(naps):
+                if optextract:
+                    zpsf = (psfmask > f32(k)) & (psfmask <= f32(k + 1))
+                    ps_ = sprofile[zpsf]
+                    ps_ = _idlmax(ps_, np.float32(0.0)) if apsign[k] == 1 else _idlmin(ps_, np.float32(0.0))
+                    tot = I.ftotal if I.isf32(ps_) else I.itotal
+                    ps_ = (apsign[k] * np.abs(ps_ / tot(ps_[np.isfinite(ps_)]))).astype(ps_.dtype)
+                    sprofile[zpsf] = ps_
+                    # IGOODBAD=bdpxmkz is the caller's array: its NaNs became 2 in it
+                    goodbad = ogoodbad * bdpx
+                    zs = ((mask > f32(k)) & (mask <= f32(k + 1)) & (sprofile != 0.0) &
+                          (goodbad == 1))
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        if zs.any():
+                            be = slitz[zs] / sprofile[zs]
+                            bv = vslitz[zs] / I.sq(sprofile[zs])
+                            if (linmkz[zs] == 1).any():
+                                obspec[j, k] += 1
+                        else:
+                            be = slitz * 0.0
+                            bv = slitz / slitz
+                            obspec[j, k] += 8
+                        m, v, _ = I.meancomb(be, datavar=bv)
+                    ofspec[j, k] = m
+                    oespec[j, k] = np.sqrt(f32(v))
+                else:
+                    z = (mask > f32(k)) & (mask <= f32(k + 1))
+                    w = (mask[z] - f32(k)).astype(f32)
+                    tot = I.ftotal if I.isf32(slitz) else I.itotal
+                    ofspec[j, k] = f32(apsign[k]) * tot(slitz[z] * w)
+                    tot = I.ftotal if I.isf32(vslitz) else I.itotal
+                    oespec[j, k] = _sqrt_store(tot(vslitz[z] * I.sq(w)))
+                    if (linmkz[z] == 1).any():
+                        obspec[j, k] += 1
+        keep = _nantrim2(owave)
+        out.append({k + 1: np.array([owave[keep], ofspec[keep, k], oespec[keep, k],
+                                     obspec[keep, k]], dtype=f32) for k in range(naps)})
+    return out
+
+
+def extxsspec(image, var, wavecal, edgecoeffs, tracecoeffs, naps, xranges, slith_arc,
+              apradii, bgr=None, bgorder=None, spatcoeffs=None, bdpxmask=None, bitmask=None,
+              bdpixthresh=7.0, errorprop=False):
+    """
+    MC_EXTXSSPEC: the SpeX-type extended-source extraction (no wavecal
+    file). The background regions `bgr` are fitted and subtracted (in 1D
+    the background does work); XSPEXTOOL_XSEXTRACTSPEC does not pass
+    ERRORPROP, so after a background fit the variance is set to 1. With
+    the spatial map (xspextool hands it over whenever the point-source
+    Optimal flag is on, the TS4 default) pixels off a `bdpixthresh`-sigma
+    fit of the profile are replaced by the scaled profile and their
+    variance set to NaN. Flags: 1 linearity, 2 a bad pixel in the
+    aperture. Returns a list, one {aperture: [4, n]} per order.
+    """
+    nrows, ncols = image.shape
+    f32 = np.float32
+    fixbdpx = spatcoeffs is not None
+    if bdpxmask is None:
+        bdpxmask = np.ones(image.shape, dtype=np.int16)
+    linmask = (np.asarray(bitmask) & 1) if bitmask is not None else np.zeros(image.shape, np.uint8)
+    y = np.arange(nrows, dtype=np.float32)
+    apradii = np.asarray(apradii, dtype=f32)
+    out = []
+    for i in range(len(xranges)):
+        start, stop = int(xranges[i][0]), int(xranges[i][1])
+        x = np.arange(stop - start + 1, dtype=f32) + f32(start)
+        bot = I.poly(x, edgecoeffs[i][0])
+        top = I.poly(x, edgecoeffs[i][1])
+        owave = wavecal[I.itrunc((bot + top) / 2.), I.itrunc(x)]
+        n = owave.size
+        ofspec = np.full((n, naps), np.nan, dtype=f32)
+        oespec = np.full((n, naps), np.nan, dtype=f32)
+        obspec = np.zeros((n, naps), dtype=f32)
+        trace = np.zeros((n, naps), dtype=f32)
+        for j in range(naps):
+            trace[:, j] = I.poly(owave, tracecoeffs[i * naps + j])
+        pixtoarc = np.zeros((n, 2), dtype=f32)
+        pixtoarc[:, 1] = np.float64(f32(slith_arc)) / (top - bot)
+        pixtoarc[:, 0] = -1. * (pixtoarc[:, 1] * bot)
+        if fixbdpx:
+            yarc, spatmap = _spatmap1d(owave, spatcoeffs[i])
+        for j in range(n):
+            if top[j] > nrows - 0.5 or bot[j] < -0.5:
+                continue
+            lo = max(0.0, float(bot[j]))
+            hi = min(float(nrows - 1), float(top[j]))
+            b, t, c = I.itrunc(lo), I.itrunc(hi), I.itrunc(x[j])
+            slity_arc = I.poly(y[b:t + 1], pixtoarc[j])
+            slitz = image[b:t + 1, c]
+            vslitz = var[b:t + 1, c].copy()
+            bb, tt = I.itrunc(bot[j]), I.itrunc(top[j])
+            bdpxmkz = np.asarray(bdpxmask[bb:tt + 1, c]).astype(np.int64)
+            linmkz = linmask[bb:tt + 1, c]
+            mask = mkapmask1d(slity_arc, trace[j], apradii, xsbginfo=bgr)
+            if bgorder is not None:
+                z = np.where((mask == -1) & (vslitz != 0.0))[0]
+                og = _moments_goodbad(slitz[z], bdpxmkz[z], 5)
+                coeff, _, cvar = I.robustpoly1d(slity_arc[z], slitz[z], bgorder, 4, 0.1,
+                                                igoodbad=og, yerr=np.sqrt(vslitz[z]),
+                                                want_covar=True)
+                if errorprop:
+                    bg, yvar = I.poly1d(slity_arc, coeff, cvar)
+                    slitz = slitz - bg
+                    vslitz = vslitz + yvar
+                else:
+                    bg, _ = I.poly1d(slity_arc, coeff)
+                    slitz = slitz - bg
+                    vslitz[:] = 1.0
+            if fixbdpx:
+                sprofile = I.linterp(yarc, spatmap[j], slity_arc)
+                try:
+                    cf, ogoodbad = I.robustpoly1d(sprofile, slitz, 1, bdpixthresh, 0.1)
+                except (ValueError, np.linalg.LinAlgError):
+                    continue                          # CANCEL: GOTO, cont2
+                scs = I.poly(sprofile, cf)
+                bad = (ogoodbad == 0) | (bdpxmkz == 0)
+                if bad.any():
+                    slitz = np.array(slitz)
+                    slitz[bad] = scs[bad]
+                    vslitz[bad] = np.nan
+            for k in range(naps):
+                z = (mask > f32(k)) & (mask <= f32(k + 1))
+                w = (mask[z] - f32(k)).astype(f32)
+                tot = I.ftotal if I.isf32(slitz) else I.itotal
+                ofspec[j, k] = tot(slitz[z] * w)
+                tot = I.ftotal if I.isf32(vslitz) else I.itotal
+                oespec[j, k] = _sqrt_store(tot(vslitz[z] * I.sq(w)))
+                if (linmkz[z] == 1).any():
+                    obspec[j, k] += 1
+                if fixbdpx:
+                    goodbad = ogoodbad * bdpxmkz
+                    if ((goodbad == 0) & z).any():
+                        obspec[j, k] += 2
+        keep = _nantrim2(owave)
+        out.append({k + 1: np.array([owave[keep], ofspec[keep, k], oespec[keep, k],
+                                     obspec[keep, k]], dtype=f32) for k in range(naps)})
     return out
 
 
@@ -598,11 +1132,15 @@ def write_spectrum(path, spectra, orders, naps, hdr0, info):
     """
     MC_WRITESPEC: a [norders*naps, 3, nwave] cube (IDL [nwave, 3, n]) of
     wavelength, flux and error, NaN-padded to the longest order, with the
-    keywords every later Spextool step reads.
+    keywords every later Spextool step reads. The 1D extraction (no wavecal
+    file, info['pixels']) adds a 4th row of flags and is in pixels, with no
+    WAVECAL, WAVETYPE or dispersions.
     """
     keys = [(o, a) for o in orders for a in range(1, naps + 1)]
     npix = max(spectra[k].shape[1] for k in keys)
-    cube = np.full((len(keys), 3, npix), np.nan)
+    nrow = max(spectra[k].shape[0] for k in keys)
+    pixels = bool(info.get("pixels"))
+    cube = np.full((len(keys), nrow, npix), np.nan)
     for n, k in enumerate(keys):
         s = spectra[k]
         cube[n, :, :s.shape[1]] = s
@@ -623,9 +1161,12 @@ def write_spectrum(path, spectra, orders, naps, hdr0, info):
     I.fxaddpar(hdr, "LINCRMAX", 80000, " Maximum of linearity correction (DN)")   # LONG, instrument file
     I.fxaddpar(hdr, "SKY", info.get("sky", "None"), " Sky image")
     I.fxaddpar(hdr, "FLAT", info.get("flat", ""), " Flat field image")
-    I.fxaddpar(hdr, "WAVECAL", info.get("wavecal", ""), " Wavecal file used for wavelength calibration")
-    I.fxaddpar(hdr, "WAVETYPE", "Vacuum", " Wavelength type (air or vacuum)")
+    if not pixels:
+        I.fxaddpar(hdr, "WAVECAL", info.get("wavecal", ""), " Wavecal file used for wavelength calibration")
+        I.fxaddpar(hdr, "WAVETYPE", "Vacuum", " Wavelength type (air or vacuum)")
     if info.get("tracefile"):
+        # XSPEXTOOL_WRITESPEC names the file only in an 'Import Coeffs' mode
+        # the TS4 point-source panel does not have, so IDL never writes it.
         I.fxaddpar(hdr, "TRACEFIL", info["tracefile"], " Trace file name")
     I.fxaddpar(hdr, "NAPS", int(naps), " Number of apertures")
     I.fxaddpar(hdr, "NORDERS", len(orders), " Number of orders")
@@ -638,6 +1179,9 @@ def write_spectrum(path, spectra, orders, naps, hdr0, info):
     for i, o in enumerate(orders):
         I.fxaddpar(hdr, f"APPOSO{o:02d}", ",".join(sigfig(p, 3) for p in info["appos"][i]),
                    f" Aperture positions (arcsec) for order {o:02d}")
+    if info.get("psfradius") is not None:
+        I.fxaddpar(hdr, "PSFRAD", f32(info["psfradius"]),
+                   " Optimal extraction PSF radius in arcseconds", fmt="f4.2")
     for i, r in enumerate(info["apradius"]):
         I.fxaddpar(hdr, f"AP{i + 1:02d}RAD", f32(r), " Aperture radius in arcseconds", fmt="f4.2")
     if info.get("psbginfo") is not None:
@@ -648,14 +1192,14 @@ def write_spectrum(path, spectra, orders, naps, hdr0, info):
     if info.get("xsbginfo") is not None:
         I.fxaddpar(hdr, "BGR", info["xsbginfo"][0], " Background regions in arcseconds")
         I.fxaddpar(hdr, "BGORDER", int(info["xsbginfo"][1]), " Background polynomial fit degree")
-        if info.get("xs_background"):         # the opt-in, not an IDL keyword
-            I.fxaddpar(hdr, "XSBGSUB", True, " Extended-source background actually subtracted")
-    I.fxaddpar(hdr, "XUNITS", "um", " Units of the X axis")
+    if info.get("xs_background"):             # the opt-in, not an IDL keyword
+        I.fxaddpar(hdr, "XSBGSUB", True, " Extended-source background actually subtracted")
+    I.fxaddpar(hdr, "XUNITS", "pixels" if pixels else "um", " Units of the X axis")
     I.fxaddpar(hdr, "YUNITS", "DN / s", " Units of the Y axis")
-    I.fxaddpar(hdr, "XTITLE", "!7k!5 (!7l!5m)", " IDL X title")
+    I.fxaddpar(hdr, "XTITLE", "!7k!5 (pixels)" if pixels else "!7k!5 (!7l!5m)", " IDL X title")
     I.fxaddpar(hdr, "YTITLE", "f (!5DN s!u-1!N)", " IDL Y title")
     I.fxaddpar(hdr, "VERSION", info.get("version", "TSR-1.0"), " Spextool version")
-    for i, o in enumerate(orders):
+    for i, o in enumerate(orders if not pixels else []):
         # SXADDPAR of the DOUBLE dispersions MC_RDWAVECAL2D read
         I.fxaddpar(hdr, f"DISPO{o:02d}", np.float64(info["disp"][i]),
                    f" Dispersion (um pixel-1) for order {o:02d}")
@@ -745,77 +1289,232 @@ def psdefine_signs(profiles, positions, doorders=None):
     return sign
 
 
+def check_ps_inputs(slith_arc, apradius, psbgsub=True, psbg=(2.5, 5.0, 1), optimal=True,
+                    psfradius=2.2, naps=2, positions=None, tracestep=None, sumap=None,
+                    tracedeg=None):
+    """
+    The range checks xspextool makes on the point-source inputs (MC_CRANGE
+    in XSPEXTOOL_PSAPFIND, _PSTRACESPEC, _PSDEFINEAP and _PSEXTRACTSPEC),
+    with its messages. Raises ValueError on the first one that fails.
+    """
+    f32 = np.float32
+    if not 1 <= naps <= 4:
+        raise ValueError("Cannot have more than four apertures per order.")
+    if positions is not None:
+        p = np.asarray(positions, dtype=f32)
+        if (p < 0).any() or (p > slith_arc).any():
+            raise ValueError(f"Pos must be between 0 and {slith_arc:g}.")
+    if tracestep is not None and not 1 <= tracestep <= 20:
+        raise ValueError("Step Size must be between 1 and 20.")
+    if sumap is not None and (sumap < 1 or sumap % 2 == 0):
+        raise ValueError("Colums Add must be odd.")
+    if tracedeg is not None and not 0 <= tracedeg <= 4:
+        raise ValueError("Trace Polynomial Degree must be between 0 and 4.")
+    if optimal and not 0 <= f32(psfradius) <= slith_arc:
+        raise ValueError(f"PSF Radius must be between 0 and {slith_arc:g}.")
+    rng = f32(psfradius) if optimal else slith_arc
+    if f32(apradius) > rng:
+        raise ValueError(f"Ap Radius must be <= {rng:g}.")
+    if psbgsub:
+        if not f32(psbg[0]) > f32(apradius):
+            raise ValueError(f"Background Start must be > {f32(apradius):g}.")
+        if not 0 <= f32(psbg[1]) <= slith_arc:
+            raise ValueError(f"Background Width must be between 0 and {slith_arc:g}.")
+        if not 0 <= psbg[2] <= 7:
+            raise ValueError("Background Fit Order must be between 0 and 7.")
+
+
 def reduce_pair(files, flatinfo, wcinfo, opaths, source="point", atran=None,
                 npeaks=2, findmode="auto", guess=None, apradius=1.0,
-                psbg=(2.5, 5.0, 1), xs_positions=None, xs_radii=None,
+                psbg=(2.5, 5.0, 1), psbgsub=True, optimal=None, psfradius=2.2,
+                medprofile=False, ps_orders=None, xs_orders=None,
+                xs_positions=None, xs_radii=None,
                 xsbg=((2., 6.), (32., 36.)), xsbgdeg=0, xs_background=False,
                 trace=True, mode="A-B", tracestep=5, sumap=5, winthresh=3.0,
-                sigthresh=0.1, tracedeg=1, ybuffer=1, atmosthresh=0.4,
+                sigthresh=0.0, tracedeg=1, ybuffer=1, atmosthresh=0.4,
                 flatname="", wavecalname="", progress=None, signs=None,
                 combined=None, sky=None, trace_out=None, trace_in=None,
-                flatfield=True, errorprop=True):
+                flatfield=True, errorprop=True, xsbgsub=True, bdpixthresh=7.0):
     """
     What xspextool does for one pair of frames with "Do All Steps", for a
     point or an extended source. Writes opaths[0] (and opaths[1] for the
     negative apertures of an A-B point source) and returns everything
     computed on the way, for display.
+
+    Point sources, with the TS4_SOAR defaults of the IDL panel:
+
+    psbgsub      'PS BG Subtraction'. In the TS4 panel this box also sets
+                 the (greyed) 'Optimal' box, so on it means optimal
+                 extraction with the background fit, off a plain sum with
+                 no background.
+    optimal      None follows psbgsub, as the panel does. False with
+                 psbgsub on gives the background-subtracted sum
+                 MC_EXTSPEC2D makes without a PSF radius: NOT something the
+                 TS4 panel can produce (its Optimal box is insensitive).
+    psfradius    PSPSFRAD, arcsec; the aperture radius may not exceed it.
+    medprofile   'Median Profile': the optimal profile is the mean spatial
+                 profile at every wavelength (MEDSPATCOEFFS) instead of the
+                 fitted spatial map (SPATCOEFFS).
+    findmode     'auto' (npeaks peaks), 'guess' or 'fixed'. For the last two
+                 `guess` is the one list of positions typed in the panel:
+                 it is used for every order and its length is the number
+                 of apertures. 'fixed' also ticks Use Ap Positions, so the
+                 apertures are not traced.
+    trace        False is 'Use Ap Positions': a constant trace at the
+                 found positions.
+    ps_orders    'PS Orders': the order numbers to extract (all if None);
+                 xs_orders is the same for an extended source.
+    trace_in     'Import Trace': the apertures, and the orders, come from
+                 a stored trace file; the signs are then set from the
+                 profile, as Do All Steps does.
+    npeaks       PSNAPS (1-4), in every reduction mode.
+
+    Extended sources: xsbgsub is 'XS BG Subtraction' (XSBGSUB=1). In 2D it
+    only decides whether A/A-Sky files name the regions (the IDL fit is
+    dead code; xs_background=True is the opt-in that applies it).
+
+    With no wavecal file (wcinfo from wavecal.no_wavecal, wctype '1D') the
+    extraction is MC_EXTPSSPEC / MC_EXTXSSPEC on detector columns, with
+    the bad pixel mask, the linearity bitmask and `bdpixthresh`
+    (BADPIXELTHRESH 7); there the XS background is subtracted when
+    xsbgsub is on, and, as xspextool hands MC_EXTXSSPEC the spatial map
+    whenever the point-source Optimal flag is on, bad pixels of an
+    extended source are fixed by default.
     """
     say = progress or (lambda *_: None)
     fl, wc = flatinfo, wcinfo
-    orders = fl["orders"]
+    f32 = np.float32
+    allorders = list(fl["orders"])
+    no = len(allorders)
+    if optimal is None:
+        optimal = bool(psbgsub)
+    if source == "point" and optimal and not psbgsub:
+        raise ValueError("Optimal extraction needs PS BG Subtraction (the TS4 panel "
+                         "switches them on and off together).")
     say("Loading the images")
     work, var, hdrs, itot = load_image(files, fl, mode=mode, sky=sky, combined=combined,
                                        flatfield=flatfield, errorprop=errorprop)
-    aw, at = atran if atran is not None else (None, None)
+    one_d = wc.get("wctype") == "1D"
+    # no ATRAN without a wavecal file (XSPEXTOOL_MKPROFILES)
+    aw, at = atran if (atran is not None and not one_d) else (None, None)
     say("Making the spatial profiles")
+    # the spatial maps are needed by optimal extraction only (the fits take a while)
+    want = optimal and (source == "point" or one_d)
     prof = mkspatprof2d(work, fl["omask"], wc["wavecal"], wc["spatcal"],
-                        fl["slith_arc"] / fl["slith_pix"], ybuffer, aw, at, atmosthresh)
+                        fl["slith_arc"] / fl["slith_pix"], ybuffer, aw, at, atmosthresh,
+                        coeffs=want)
+    prof, spc, mspc = prof if want else (prof, None, None)
     info = dict(modename=fl["modename"], slith_pix=fl["slith_pix"], slith_arc=fl["slith_arc"],
                 slitw_pix=fl["slitw_pix"], slitw_arc=fl["slitw_arc"], rp=fl["rp"],
-                disp=wc["disp"], flat=flatname, wavecal=wavecalname)
-    if source == "point" and trace_in:
-        # 'Import Trace': the apertures follow a stored trace; their signs
-        # come from the profile at the trace's mean position.
-        _, npeaks, tc = read_trace(trace_in)
-        paths = tracetoap2d(fl["omask"], wc["wavecal"], wc["spatcal"], tc, npeaks, orders)
-        pos = np.array([[paths[i * npeaks + j]["appos"] for j in range(npeaks)]
-                        for i in range(len(orders))])
-        _, sgn = findpeaks(prof, npeaks, mode="fixed", fixed=pos)
-        sign = np.asarray(signs if signs is not None else sgn, dtype=int)
+                flat=flatname, wavecal=wavecalname)
+    doorders = np.ones(no, dtype=int)
+    if source == "point":
+        apradius, psfradius = f32(apradius), f32(psfradius)       # MC_CFLD(...,4)
+        psbg = (f32(psbg[0]), f32(psbg[1]), psbg[2])
+        if ps_orders is not None:
+            doorders = np.array([1 if o in ps_orders else 0 for o in allorders])
+            if doorders.sum() < 1:
+                raise ValueError("Must select at least one Order.")
         pts = []
-        apradii = np.full((len(orders), npeaks), float(apradius))
-        say("Extracting")
-        spec = extspec2d(work, var, fl["omask"], orders, wc["wavecal"], wc["spatcal"], fl["ps"],
-                         sign, tc, apradii, psbginfo=list(psbg[:2]), bgdeg=psbg[2])
-        info.update(apradius=[float(apradius)], psbginfo=list(psbg), tracefile=os.path.basename(trace_in))
-    elif source == "point":
-        say("Finding the apertures")
-        if findmode == "auto":
-            pos, _ = findpeaks(prof, npeaks, mode="auto")
-        elif findmode == "guess":
-            pos, _ = findpeaks(prof, npeaks, mode="guess", guess=guess)
+        if trace_in:
+            # 'Import Trace' (XSPEXTOOL_PSAPFIND): orders and coefficients
+            # from the file, positions their mean, signs from the profile.
+            torders, npeaks, tc = read_trace(trace_in)
+            doorders = np.array([1 if o in torders else 0 for o in allorders])
+            paths = tracetoap2d(fl["omask"], wc["wavecal"], wc["spatcal"], tc, npeaks,
+                                allorders, doorders)
+            pos = np.full((no, npeaks), np.nan, dtype=f32)
+            l = 0
+            for i in range(no):
+                if doorders[i]:
+                    for j in range(npeaks):
+                        pos[i, j] = paths[l]["appos"]
+                        l += 1
+            check_ps_inputs(fl["slith_arc"], apradius, psbgsub, psbg, optimal, psfradius, npeaks)
         else:
-            pos, _ = findpeaks(prof, npeaks, mode="fixed", fixed=guess)
-        if trace:
-            say("Tracing the apertures")
-            tc, pts = tracespec2d(work, wc["wavecal"], wc["spatcal"], fl["edgecoeffs"],
-                                  fl["xranges"], pos, tracestep, sumap, winthresh,
-                                  sigthresh, tracedeg)
-        else:
-            tc = np.array([[pos[i, j], 0.0] for i in range(len(orders)) for j in range(npeaks)])
-            pts = []
-        sign = psdefine_signs(prof, pos)
+            say("Finding the apertures")
+            if findmode == "auto":
+                check_ps_inputs(fl["slith_arc"], apradius, psbgsub, psbg, optimal, psfradius,
+                                npeaks, tracestep=tracestep if trace else None,
+                                sumap=sumap if trace else None, tracedeg=tracedeg if trace else None)
+                pos, _ = findpeaks(prof, npeaks, doorders, mode="auto")
+            else:
+                g = np.asarray(guess, dtype=f32)                  # FLOAT(STRSPLIT(...))
+                if g.ndim == 1:                                   # one list for every order
+                    g = np.repeat(g[None, :], no, axis=0)
+                npeaks = g.shape[1]
+                if findmode == "fixed":
+                    trace = False                                 # ticks Use Ap Positions
+                check_ps_inputs(fl["slith_arc"], apradius, psbgsub, psbg, optimal, psfradius,
+                                npeaks, positions=g, tracestep=tracestep if trace else None,
+                                sumap=sumap if trace else None, tracedeg=tracedeg if trace else None)
+                if findmode == "guess":
+                    pos, _ = findpeaks(prof, npeaks, doorders, mode="guess", guess=g)
+                else:
+                    pos, _ = findpeaks(prof, npeaks, doorders, mode="fixed", fixed=g)
+            sel = np.where(doorders == 1)[0]
+            if trace:
+                say("Tracing the apertures")
+                tc, pts = tracespec2d(work, wc["wavecal"], wc["spatcal"], fl["edgecoeffs"][sel],
+                                      [fl["xranges"][i] for i in sel], pos[sel], tracestep,
+                                      sumap, f32(winthresh), f32(sigthresh), tracedeg)
+            else:
+                # Use Ap Positions: an FLTARR [pos, 0] per aperture, taking
+                # appos[*, i] with i counting the selected orders (so with
+                # an order deselected below a selected one it reads the
+                # wrong order's positions, as the IDL does).
+                tc = np.array([[pos[i, j], 0.0] for i in range(len(sel)) for j in range(npeaks)],
+                              dtype=f32)
+                if np.isnan(tc).any():
+                    raise ValueError("Use Ap Positions with these PS Orders reads the positions "
+                                     "of a deselected order (NaN); IDL's extraction never "
+                                     "returns from that. Select the orders from the lowest up.")
+            if trace_out:
+                write_trace(trace_out, [allorders[i] for i in sel], npeaks, tc, fl["modename"])
+        # XSPEXTOOL_PSDEFINEAP: apertures inside the slit, signs from the profile
+        for i in range(no):
+            if doorders[i]:
+                t = np.concatenate([pos[i] + apradius, pos[i] - apradius])
+                if (t < 0).any() or (t > fl["slith_arc"]).any():
+                    raise ValueError("Some of the extraction apertures extend beyond the slit. "
+                                     "Please lower the aperture radius.")
+        sign = psdefine_signs(prof, pos, doorders)
         if signs is not None:                 # XSPEXTOOL_OVERRIDESIGNS
             sign = np.asarray(signs, dtype=int)
-        if trace_out:
-            write_trace(trace_out, orders, npeaks, tc, fl["modename"])
-        apradii = np.full((len(orders), npeaks), float(apradius))
+        orders = [allorders[i] for i in range(no) if doorders[i]]
+        apradii = np.full((len(orders), npeaks), apradius, dtype=f32)
+        smap = None
+        if optimal:
+            c = mspc if medprofile else spc
+            smap = [c[o] for o in orders]
         say("Extracting")
-        spec = extspec2d(work, var, fl["omask"], orders, wc["wavecal"], wc["spatcal"], fl["ps"],
-                         sign, tc, apradii, psbginfo=list(psbg[:2]), bgdeg=psbg[2])
-        info.update(apradius=[float(apradius)], psbginfo=list(psbg))
+        if one_d:
+            sel = [i for i in range(no) if doorders[i]]
+            r1 = extpsspec(work, var, wc["wavecal"], [fl["edgecoeffs"][i] for i in sel], tc, npeaks,
+                           [fl["xranges"][i] for i in sel], fl["slith_arc"],
+                           np.full(npeaks, apradius, dtype=f32), sign,
+                           psfwidth=psfradius if optimal else None, spatcoeffs=smap,
+                           bgorder=psbg[2] if psbgsub else None,
+                           psbginfo=[psbg[0], psbg[1]] if psbgsub else None,
+                           bdpxmask=load_bdpxmask(fl["rotation"]),
+                           bitmask=load_bitmask(files, fl, mode, sky, combined),
+                           bdpixthresh=f32(bdpixthresh))
+            spec = {(o, a): r1[n][a] for n, o in enumerate(orders) for a in r1[n]}
+        else:
+            spec = extspec2d(work, var, fl["omask"], orders, wc["wavecal"], wc["spatcal"], fl["ps"],
+                             sign, tc, apradii,
+                             psbginfo=[psbg[0], psbg[1]] if psbgsub else None,
+                             bgdeg=psbg[2] if psbgsub else None,
+                             psfradius=psfradius if optimal else None, smapinfo=smap)
+        info.update(apradius=[apradius], psbginfo=list(psbg) if psbgsub else None,
+                    psfradius=psfradius if optimal else None)
     else:
-        pos = np.array([list(xs_positions)] * len(orders), dtype=float)
+        if xs_orders is not None:
+            doorders = np.array([1 if o in xs_orders else 0 for o in allorders])
+            if doorders.sum() < 1:
+                raise ValueError("Must select at least one Order.")
+        orders = [allorders[i] for i in range(no) if doorders[i]]
+        pos = np.array([list(xs_positions)] * no, dtype=float)
         naps = pos.shape[1]
         radii = list(xs_radii) if xs_radii is not None else [1.0] * naps
         tc = np.array([[pos[i, j], 0.0] for i in range(len(orders)) for j in range(naps)])
@@ -823,12 +1522,37 @@ def reduce_pair(files, flatinfo, wcinfo, opaths, source="point", atran=None,
         sign = np.ones(naps, dtype=int)
         apradii = np.array([radii] * len(orders), dtype=float)
         say("Extracting")
-        spec = extspec2d(work, var, fl["omask"], orders, wc["wavecal"], wc["spatcal"], fl["ps"],
-                         sign, tc, apradii,
-                         xsbginfo=[list(r) for r in xsbg] if xs_background else None,
-                         bgdeg=xsbgdeg if xs_background else None)
+        if one_d:
+            sel = [i for i in range(no) if doorders[i]]
+            smap = None
+            if optimal:
+                # built from the PS Orders (XSPEXTOOL_XSEXTRACTSPEC), used by position
+                c = mspc if medprofile else spc
+                psel = allorders if ps_orders is None else [o for o in allorders if o in ps_orders]
+                smap = [c[o] for o in psel]
+            r1 = extxsspec(work, var, wc["wavecal"], [fl["edgecoeffs"][i] for i in sel],
+                           tc.astype(f32), naps, [fl["xranges"][i] for i in sel], fl["slith_arc"],
+                           np.asarray(radii, dtype=f32),
+                           bgr=[np.asarray(r_, dtype=f32) for r_ in xsbg] if xsbgsub else None,
+                           bgorder=int(xsbgdeg) if xsbgsub else None, spatcoeffs=smap,
+                           bdpxmask=load_bdpxmask(fl["rotation"]),
+                           bitmask=load_bitmask(files, fl, mode, sky, combined),
+                           bdpixthresh=f32(bdpixthresh))
+            spec = {(o, a): r1[n][a] for n, o in enumerate(orders) for a in r1[n]}
+        else:
+            spec = extspec2d(work, var, fl["omask"], orders, wc["wavecal"], wc["spatcal"], fl["ps"],
+                             sign, tc, apradii,
+                             xsbginfo=[list(r) for r in xsbg] if xs_background else None,
+                             bgdeg=xsbgdeg if xs_background else None)
         bgtxt = ",".join(f"{a:g}-{b:g}" for a, b in xsbg)
-        info.update(apradius=radii, xsbginfo=[bgtxt, str(xsbgdeg)], xs_background=xs_background)
+        # XSPEXTOOL_WRITESPEC passes the background regions in A and A-Sky only,
+        # and only with XS BG Subtraction on
+        info.update(apradius=radii,
+                    xsbginfo=[bgtxt, str(xsbgdeg)] if (mode != "A-B" and xsbgsub) else None,
+                    xs_background=xs_background)
+    good = [i for i in range(no) if doorders[i]]
+    info["disp"] = [wc["disp"][i] for i in good] if not one_d else None
+    info["pixels"] = one_d
     written = []
     names = [os.path.basename(f) for f in files] if files else [os.path.basename(combined or "")]
     if mode != "A-B":
@@ -836,7 +1560,7 @@ def reduce_pair(files, flatinfo, wcinfo, opaths, source="point", atran=None,
         sub = {(o, j + 1): spec[(o, j + 1)] for o in orders for j in range(len(sign))}
         d = dict(info)
         d.update(aimage=names[0], sky=os.path.basename(sky) if (mode == "A-Sky" and sky) else "None",
-                 itot=itot[0], appos=[list(pos[i]) for i in range(len(orders))])
+                 itot=itot[0], appos=[list(pos[i]) for i in good])
         write_spectrum(opaths[0], sub, orders, len(sign), hdrs[0], d)
         written.append(opaths[0])
     for k, (want, hidx) in enumerate(((1, 0), (-1, 1)) if mode == "A-B" else ()):
@@ -849,8 +1573,9 @@ def reduce_pair(files, flatinfo, wcinfo, opaths, source="point", atran=None,
                 sub[(o, n + 1)] = spec[(o, j + 1)]
         d = dict(info)
         d.update(aimage=names[hidx], sky=names[1 - hidx],
-                 itot=itot[hidx], appos=[[pos[i, j] for j in aps] for i in range(len(orders))])
+                 itot=itot[hidx], appos=[[pos[i, j] for j in aps] for i in good])
         write_spectrum(opaths[k], sub, orders, len(aps), hdrs[hidx], d)
         written.append(opaths[k])
     return dict(written=written, profiles=prof, positions=pos, signs=sign, trace=tc,
-                trace_points=pts, work=work, var=var, spectra=spec, headers=hdrs)
+                trace_points=pts, work=work, var=var, spectra=spec, headers=hdrs,
+                orders=orders, spatcoeffs=spc, medspatcoeffs=mspc)

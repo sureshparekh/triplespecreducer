@@ -6,6 +6,10 @@ The last, optional step: XCLEANSPEC.
     'f' fix      a region replaced by the straight line between its ends,
                  flag bit 2 (value 4) set
     'r' remove   a region set to NaN
+    's' / 'u'    commit the edits / go back to the last commit (Session)
+
+Session keeps XCLEANSPEC's loaded, committed and working copies, so a
+caller smooths once per load and writes only what was committed.
 """
 
 import numpy as np
@@ -111,15 +115,19 @@ def convolvespec(wave, flux, fwhm, error=None, khwidth=4, edge_truncate=False):
 
 def read(path):
     """
-    How XCLEANSPEC reads a spectrum (MC_READSPEC): the stored type, and the
-    merged [npix, 4] form as one order. Returns (cube, header, two_d).
+    How XCLEANSPEC reads a spectrum: MC_READSPEC (the stored type), then
+    MC_CAASPECFLAGS (a three-column spectrum gets a flag column and becomes
+    FLOAT); the merged [npix, 4] form as one order. Any Spextool spectrum
+    file: every order and aperture. Returns (cube, header, two_d).
     """
+    from triplespec_reducer.extract import caaspecflags
     with fits.open(path) as h:
         d = h[0].data
         spec = d.astype(d.dtype.newbyteorder("="))
         hdr = h[0].header
     two_d = spec.ndim == 2
-    return (spec[None] if two_d else spec), hdr, two_d
+    cube = caaspecflags(spec[None] if two_d else spec)
+    return cube, hdr, two_d
 
 
 def write(path, cube, hdr, history="", two_d=True):
@@ -131,15 +139,50 @@ def write(path, cube, hdr, history="", two_d=True):
     fits.PrimaryHDU(cube[0] if two_d else cube, header=hdr).writeto(path, overwrite=True)
 
 
+def _field(v):
+    """A FLOAT widget field: the text a number shows as (STRTRIM), read back with FLOAT()."""
+    return np.float32(f"{float(np.float32(v)):#13.6g}".strip())
+
+
+def defaults(hdr):
+    """
+    XCLEANSPEC_LOADSPEC's panel values from the file's SLTW_PIX (FXPAR):
+    SG width STRING(slitw_pix x 1.5, '(f4.1)') (x 2.5 when the slit is 2
+    pixels or narrower), degree 2, Gaussian FWHM STRTRIM of the FLOAT
+    slitw_pix field; each as the FLOAT its field gives back.
+    """
+    sw = I.fxpar(hdr, "SLTW_PIX")
+    sw = sw if isinstance(sw, (np.floating, float)) else np.float32(sw)
+    scale = np.float32(1.5) if sw > 2 else np.float32(2.5)
+    prod = sw * scale
+    return dict(slitw_pix=np.float32(sw), sgwin=np.float32(f"{float(prod):4.1f}".strip()),
+                sgdeg=np.float32(2), fwhm=_field(sw))
+
+
+def check_degree(sgwin, sgdeg):
+    """MC_CRANGE(sgdeg, sgwin, 'SG Degree', /KLT): the degree must be below the width."""
+    if not np.float32(sgdeg) < np.float32(sgwin):
+        raise ValueError(f"SG Degree out of range: the degree ({float(np.float32(sgdeg)):g}) must be "
+                         f"smaller than the SG window ({float(np.float32(sgwin)):g})")
+
+
 def smooth(spec, method="Savitzky-Golay", sgwin=None, sgdeg=2, fwhm=None, slitw_pix=2.4):
     """
-    XCLEANSPEC_SMOOTHSPEC on a [n, 4, npix] cube. The defaults are the
-    panel's: SG width slitw_pix x 1.5 (x 2.5 when the slit is 2 pixels or
-    narrower), degree 2; Gaussian FWHM = slitw_pix pixels.
+    XCLEANSPEC_SMOOTHSPEC on a [n, 4, npix] cube (every order and
+    aperture). The defaults are the panel's (see defaults): SG width
+    slitw_pix x 1.5 (x 2.5 when the slit is 2 pixels or narrower), degree
+    2; Gaussian FWHM = slitw_pix pixels. The SG degree must be below the
+    width (MC_CRANGE /KLT), or nothing is smoothed (ValueError).
+
+    In the history, SAVITZKY_GOLAY has already changed the width field's
+    variable to FIX(width) > 3 (an INT) and the degree to degree > 2, so the
+    text gives those.
     """
     out = spec.copy()
     sgwin = float(f"{slitw_pix * (1.5 if slitw_pix > 2 else 2.5):.1f}") if sgwin is None else sgwin
     fwhm = slitw_pix if fwhm is None else fwhm
+    if method == "Savitzky-Golay":
+        check_degree(sgwin, sgdeg)
     for i in range(spec.shape[0]):
         z = np.isfinite(spec[i, 1])
         if method == "Savitzky-Golay":
@@ -152,31 +195,42 @@ def smooth(spec, method="Savitzky-Golay", sgwin=None, sgdeg=2, fwhm=None, slitw_
             f, e = convolvespec(x, spec[i, 1][z], np.float32(fwhm), error=spec[i, 2][z])
             out[i, 1, z] = f
             out[i, 2, z] = e
-    # XCLEANSPEC_SMOOTHSPEC's history: the FLOAT field values as STRTRIM prints them
+    # XCLEANSPEC_SMOOTHSPEC's history: the field values as STRTRIM prints them
     fs = lambda v: f"{float(np.float32(v)):#13.6g}".strip()
     lead = "These spectra have" if spec.shape[0] > 1 else "This spectrum has"
-    history = (f"{lead} been convolved with a Savitzky-Golay filter of width {fs(sgwin)} "
-               f"pixels and degree {fs(sgdeg)}." if method == "Savitzky-Golay"
-               else f"{lead} been convolved with a Gaussian of FWHM={fs(fwhm)} pixels.")
+    if method == "Savitzky-Golay":
+        width = max(I.itrunc(np.float32(sgwin)), 3)              # FIX(width) > 3
+        degree = max(np.float32(sgdeg), np.float32(2))          # degree > 2, FLOAT
+        history = (f"{lead} been convolved with a Savitzky-Golay filter of width {width} "
+                   f"pixels and degree {fs(degree)}.")
+    else:
+        history = f"{lead} been convolved with a Gaussian of FWHM={fs(fwhm)} pixels."
     return out, history
 
 
 def _mc_tabinv(xarr, x):
-    """Spextool MC_TABINV: TABINV on the NaN-trimmed array, offset back."""
+    """Spextool MC_TABINV: TABINV on the NaN-trimmed array, offset back (FLOAT + LONG)."""
     from triplespec_reducer.wavecal import nantrim
     k = nantrim(xarr, 2)
-    return I.tabinv(xarr[k], x) + k[0]
+    t = I.tabinv(xarr[k], x)
+    if I.isf32(t):
+        return (t + np.float32(k[0])).astype(np.float32)
+    return t + k[0]
 
 
-def fix_region(spec, idx, w0, w1, flux_too=True):
+def fix_region(spec, idx, w0, w1, flux_too=True, work=None):
     """
     'f': a straight line between the two ends of [w0, w1]; flag +4. The
     region comes from the cursor (FLOAT), sorted, through MC_TABINV.
+    `flux_too=False` is the 'Error' spectrum type: only the error is
+    replaced (the flag is still raised).
 
-    In XCLEANSPEC the line is drawn into the working copy and kept only
-    when 's' is pressed; here every edit is kept, as if 's' followed each.
+    XCLEANSPEC computes the line from the committed spectrum (`spec`, its
+    espec) and draws it into the working copy (`work`, its pspec, flag
+    included), which 's' commits; `work=None` edits a copy of `spec`, as if
+    's' followed each edit. Returns the new working copy.
     """
-    out = spec.copy()
+    out = (spec if work is None else work).copy()
     i0, i1 = I.iround(_mc_tabinv(spec[idx, 0], np.sort(np.array([w0, w1], dtype=np.float32))))
     x = spec[idx, 0, [i0, i1]]
     if flux_too:
@@ -189,12 +243,88 @@ def fix_region(spec, idx, w0, w1, flux_too=True):
     return out
 
 
-def remove_region(spec, idx, w0, w1, flux_too=True):
-    """'r': the region set to NaN (cursor positions FLOAT, through MC_TABINV)."""
-    out = spec.copy()
+def remove_region(spec, idx, w0, w1, flux_too=True, work=None):
+    """
+    'r': the region set to NaN (cursor positions FLOAT, through MC_TABINV on
+    the committed spectrum `spec`), in the working copy `work` (a copy of
+    `spec` when None). `flux_too=False` is the 'Error' spectrum type.
+    """
+    out = (spec if work is None else work).copy()
     i0, i1 = sorted(I.iround(_mc_tabinv(spec[idx, 0], np.array([w0, w1], dtype=np.float32))))
     i0, i1 = max(i0, 0), min(i1, spec.shape[2] - 1)
     if flux_too:
         out[idx, 1, i0:i1 + 1] = np.nan
     out[idx, 2, i0:i1 + 1] = np.nan
     return out
+
+
+class Session:
+    """
+    One XCLEANSPEC session on one loaded file, with its three copies:
+    `ospec` as loaded, `espec` the committed spectrum (what is written),
+    `pspec` the working copy that edits are drawn into.
+
+        fix / remove   'f' / 'r' on spectrum `idx` (index()), from espec
+                       into pspec; spectype 'Flux' or 'Error'
+        commit         's': espec = pspec
+        undo           'u': pspec = espec (back to the last commit, which
+                       includes the smoothing)
+        smooth         'Smooth Spectra': once per load, from espec (the
+                       loaded spectrum and the edits committed so far);
+                       espec = pspec = the result. A second call raises,
+                       as the panel is greyed out after the first.
+        write          XCLEANSPEC_WRITEFILE: espec, so uncommitted edits
+                       are not written
+    """
+
+    def __init__(self, path):
+        self.path = path
+        cube, hdr, two_d = read(path)
+        self.hdr, self.two_d = hdr, two_d
+        self.ospec = cube
+        self.espec = cube.copy()
+        self.pspec = cube.copy()
+        o = str(I.fxpar(hdr, "ORDERS")) if "ORDERS" in hdr else "0"
+        self.orders = [int(t) for t in o.split(",")]
+        self.naps = int(I.fxpar(hdr, "NAPS")) if "NAPS" in hdr else 1
+        self.defaults = defaults(hdr) if "SLTW_PIX" in hdr else None
+        self.history = ""
+        self.smoothed = False
+
+    def index(self, order=None, aperture=1):
+        """
+        The spectrum index of an order and aperture: (position of the order)
+        x naps + aperture - 1, as 'Plot Order' sets it. ('Plot Aperture' uses
+        (order - first order) instead of the position; the two agree for
+        consecutive increasing orders such as TripleSpec's 3-7.)
+        """
+        order = self.orders[0] if order is None else order
+        return self.orders.index(order) * self.naps + (aperture - 1)
+
+    def fix(self, idx, w0, w1, spectype="Flux"):
+        self.pspec = fix_region(self.espec, idx, w0, w1, flux_too=spectype == "Flux", work=self.pspec)
+
+    def remove(self, idx, w0, w1, spectype="Flux"):
+        self.pspec = remove_region(self.espec, idx, w0, w1, flux_too=spectype == "Flux", work=self.pspec)
+
+    def commit(self):
+        self.espec = self.pspec.copy()
+
+    def undo(self):
+        self.pspec = self.espec.copy()
+
+    def smooth(self, method="Savitzky-Golay", sgwin=None, sgdeg=None, fwhm=None):
+        if self.smoothed:
+            raise RuntimeError("the spectrum has already been smoothed once: XCLEANSPEC allows one "
+                               "smoothing per load (load the file again to start over)")
+        d = self.defaults or {}
+        sgwin = d.get("sgwin", 3.6) if sgwin is None else sgwin
+        sgdeg = d.get("sgdeg", 2) if sgdeg is None else sgdeg
+        fwhm = d.get("fwhm", 2.4) if fwhm is None else fwhm
+        out, self.history = smooth(self.espec, method=method, sgwin=sgwin, sgdeg=sgdeg, fwhm=fwhm)
+        self.espec = out
+        self.pspec = out.copy()
+        self.smoothed = True
+
+    def write(self, path):
+        write(path, self.espec, self.hdr, self.history, self.two_d)

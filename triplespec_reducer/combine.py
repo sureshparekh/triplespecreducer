@@ -2,12 +2,20 @@
 Combining the spectra of one target: XCOMBSPEC.
 
     every spectrum onto the first one's grid   MC_INTERPSPEC (LEAVENANS)
-    scale factors from one order               XMC_SCALESPEC 'Median'
+    optional scale factors from one order      XMC_SCALESPEC 'Median',
+                                               'Spectrum' or 'None'
                                                (MC_GETSPECSCALE over the
-                                               middle 80% of that order)
+                                               middle 80% of that order or
+                                               a chosen range)
     optional prune of a spectrum or pixels     XMC_MASKSPEC
     optional shape correction                  MC_SPECCOR
     combine, per order and aperture            MC_MEANCOMB / MC_MEDCOMB
+    write, header and history                  XCOMBSPEC_WRITEFILE
+
+Once a spectrum is removed from an order, XCOMBSPEC gives the statistics the
+spectra in use with the pixel mask of the whole stack; that is reproduced
+(meancomb_stackmask, medcomb_stackmask), the intended computation is the
+option intended_masks=True.
 
 The statistics are XCOMBSPEC's nine, by name; the default is its own,
 "Robust Weighted Mean" with a threshold of 8.
@@ -133,6 +141,14 @@ def load(files, combine_apertures=False):
     apertures: Yes') every aperture of every file goes into one stack and
     one aperture comes out; the integration time then counts each file
     twice, as XCOMBSPEC counts it.
+
+    Each file is interpolated from its pixels where the first file's
+    wavelengths are finite, as XCOMBSPEC_LOADSPEC selects them. The
+    returned state also keeps the unmodified stacks (`ospc`, from which
+    scaling starts), the masks Prune Spectra sets (`spcmask`, `pixmask`,
+    all ones) and how far each aperture has been modified (`modspec`:
+    1 scaled, 3 shape-corrected), which XCOMBSPEC uses to refuse a second
+    scaling or correction.
     """
     first = read_spectrum(files[0])
     orders, naps = first["orders"], first["naps"]
@@ -154,50 +170,143 @@ def load(files, combine_apertures=False):
             for k in range(naps):
                 n = j * naps + k
                 z = np.isfinite(fs[n, 0])
-                nf, ne = interpspec(data[n, 0], data[n, 1], fs[n, 0][z],
-                                    iyerror=data[n, 2], leavenans=True)
-                nb = interpflagspec(data[n, 0], data[n, 3], fs[n, 0][z])
+                nf, ne = interpspec(data[n, 0][z], data[n, 1][z], fs[n, 0][z],
+                                    iyerror=data[n, 2][z], leavenans=True)
+                nb = interpflagspec(data[n, 0][z], data[n, 3][z], fs[n, 0][z])
                 a, row = (0, i * naps + k) if combine_apertures else (k, i)
                 spc[a][j][row, 0, z] = fs[n, 0][z]
                 spc[a][j][row, 1, z] = nf
                 spc[a][j][row, 2, z] = ne
                 spc[a][j][row, 3, z] = nb
-    return dict(spc=spc, orders=orders, naps=fnaps, files=list(files), itot=itot,
-                headers=hdrs, first=first, combine_apertures=combine_apertures)
+    ospc = [[s_.copy() for s_ in ap] for ap in spc]
+    spcmask = [np.ones((len(orders), nspec), dtype=int) for _ in range(fnaps)]
+    pixmask = [[np.ones((nspec, npix), dtype=int) for _ in orders] for _ in range(fnaps)]
+    return dict(spc=spc, ospc=ospc, orders=orders, naps=fnaps, filenaps=naps, files=list(files),
+                itot=itot, headers=hdrs, first=first, combine_apertures=combine_apertures,
+                spcmask=spcmask, pixmask=pixmask, modspec=[0] * fnaps)
 
 
-def scale(loaded, order, aperture=1, spcmask=None, srange=None):
+SCALE_MODES = ["None", "Median", "Spectrum"]
+
+
+def scale(loaded, order, aperture=1, spcmask=None, srange=None, mode="Median", spectrum=None):
     """
-    XCOMBSPEC_SCALESPEC with XMC_SCALESPEC 'Median'.
+    XCOMBSPEC_SCALESPEC with XMC_SCALESPEC.
 
-    Factors come from `order` over the middle 80% of its wavelengths (or
-    `srange`) and are applied to every order. Returns the factors and the
-    median RMS of each order after scaling.
+    Factors come from `order` and are applied to every order of the
+    aperture; each aperture is scaled on its own call, so each can use its
+    own order. `mode` is XMC_SCALESPEC's 'Scale to' choice: 'Median' (the
+    default: MC_GETSPECSCALE against the median spectrum of the spectra
+    not removed from that order), 'Spectrum' (against spectrum `spectrum`,
+    0-based, which must not be removed; every spectrum's factor is computed
+    and those of the removed ones are set back to 1) or 'None' (all 1).
+    `srange` is the wavelength range chosen with 's'; by default the middle
+    80% of the order. As XCOMBSPEC does, the scaling starts from the loaded
+    spectra and is refused once the aperture has been scaled or corrected.
+    Not calling this at all is not clicking 'Scale Spectra': nothing is
+    scaled and the history says nothing about scaling. Returns the factors
+    and the median RMS of each order after scaling.
     """
-    spc = loaded["spc"][aperture - 1]
+    ap = aperture - 1
+    if loaded["modspec"][ap] > 0:
+        raise ValueError("Cannot perform this operation again. Please reload spectra and start over.")
+    if mode not in SCALE_MODES:
+        raise ValueError(f"mode must be one of {SCALE_MODES}")
     zo = loaded["orders"].index(order)
+    spc = [s_.copy() for s_ in loaded["ospc"][ap]]           # (*state.d.ospec)[ap]
     nf = spc[zo].shape[0]
-    mask = np.ones(nf, dtype=int) if spcmask is None else np.asarray(spcmask)
+    mask = (np.asarray(loaded["spcmask"][ap][zo]) if spcmask is None
+            else np.asarray(spcmask)).astype(int)
     wave = spc[zo][0, 0]
     flux = spc[zo][:, 1, :]
+    # XMC_SCALESPEC_INITCOMMON: a FLOAT range
+    wmin, wmax = np.nanmin(wave), np.nanmax(wave)
     if srange is None:
-        wmin, wmax = np.nanmin(wave), np.nanmax(wave)
         wr = wmax - wmin
-        srange = [wmin + 0.1 * wr, wmax - 0.1 * wr]
+        srange = [wmin + np.float32(0.1) * wr, wmax - np.float32(0.1) * wr]
+    else:
+        srange = np.sort(np.asarray(srange, dtype=np.float32))
+        if not (wmin < srange[0] and srange[1] < wmax):           # MC_CRANGE /KGT /KLT
+            raise ValueError("The scale wavelength range must lie inside the order.")
+    srange = np.asarray(srange, dtype=np.float32)
     z = (wave > srange[0]) & (wave < srange[1])
     zm = np.where(mask == 1)[0]
     scales = np.ones(nf, dtype=np.float32)
-    scales[zm] = getspecscale(flux[zm][:, z])
+    if mode == "Median":
+        scales[zm] = getspecscale(flux[zm][:, z])
+    elif mode == "Spectrum":
+        if spectrum is None or spectrum not in zm:
+            raise ValueError("Choose a spectrum that is not removed from the scale order.")
+        scales[zm] = getspecscale(flux[:, z], idx=spectrum)[zm]
     medrms = []
     for j in range(len(loaded["orders"])):
         spc[j][:, 1, :] *= scales[:, None]
         spc[j][:, 2, :] *= scales[:, None]
-        _, var, _ = I.meancomb(spc[j][zm, 1, :], rms=True)
+        if zm.size == 1:                    # REFORM leaves one spectrum: MC_MEANCOMB's 1-D case
+            _, var, _ = I.meancomb(spc[j][zm[0], 1, :], rms=True)
+        else:
+            _, var, _ = I.meancomb(spc[j][zm, 1, :], rms=True)
         medrms.append(I.median(np.sqrt(var), even=True))
+    loaded["spc"][ap] = spc                                   # (*state.d.wspec)[ap]
+    loaded["modspec"][ap] = 1
     loaded.setdefault("scales", {})[aperture] = scales
     loaded.setdefault("scaleorder", {})[aperture] = order
     loaded.setdefault("medrms", {})[aperture] = medrms
+    loaded.setdefault("scalemode", {})[aperture] = mode
+    loaded.setdefault("srange", {})[aperture] = srange
     return scales, medrms
+
+
+def maskspec(wave, nspec, remove=(), regions=()):
+    """
+    XMC_MASKSPEC: the spectrum mask and pixel mask that one 'Prune Spectra'
+    session returns for one order.
+
+    `remove` lists the spectra (0-based) taken out ('Remove'); `regions`
+    lists the wavelength ranges masked ('Mask' with 's'), each (w1, w2) for
+    every spectrum not removed (the 'All' button) or (w1, w2, spectra).
+    A range becomes pixels as XMC_MASKSPEC converts it: TABINV on the
+    NaN-trimmed wavelengths, in FLOAT, plus the first good pixel, the two
+    indices truncated, both ends included. Returns specmask (1 kept) and
+    pixmask (nspec, npix; 1 use, 0 masked).
+    """
+    from triplespec_reducer.wavecal import nantrim
+    wave = np.asarray(wave, dtype=np.float32)
+    removespec = np.zeros(nspec, dtype=int)
+    removespec[list(remove)] = 1
+    pix = np.ones((nspec, wave.size), dtype=np.float32)
+    good = nantrim(wave, 2)
+    for reg in regions:
+        tmp = np.sort(np.asarray(reg[:2], dtype=np.float32))     # state.p.reg is FLOAT
+        if len(reg) > 2:
+            z = np.asarray(reg[2], dtype=int)
+        else:
+            z = np.where(removespec == 0)[0]
+        if z.size == 0:
+            continue
+        idx = I.tabinv(wave[good], tmp) + np.float32(good[0])
+        lo, hi = I.itrunc(idx[0]), I.itrunc(idx[1])
+        pix[np.ix_(z, np.arange(lo, hi + 1))] = np.nan
+    specmask = (removespec <= 0).astype(int)
+    pixmask = np.where(np.isfinite(pix), pix, 0.0).astype(int)
+    return specmask, pixmask
+
+
+def prune(loaded, order, aperture=1, remove=(), regions=()):
+    """
+    XCOMBSPEC_PRUNESPEC: one XMC_MASKSPEC session on `order` of one
+    aperture. As in XCOMBSPEC, each session starts from no mask and its
+    result replaces that order's spectrum mask and pixel mask; the pixel
+    mask applies to that order only.
+    """
+    ap = aperture - 1
+    zo = loaded["orders"].index(order)
+    wave = loaded["ospc"][ap][zo][0, 0]
+    nspec = loaded["ospc"][ap][zo].shape[0]
+    specmask, pixmask = maskspec(wave, nspec, remove=remove, regions=regions)
+    loaded["spcmask"][ap][zo] = specmask
+    loaded["pixmask"][ap][zo] = pixmask
+    return specmask, pixmask
 
 
 def robustsg(x, y, width, thresh, eps, degree=None):
@@ -234,33 +343,138 @@ def robustsg(x, y, width, thresh, eps, degree=None):
     return np.stack([x, out])
 
 
-def correct_shapes(loaded, aperture=1, spcmask=None, fwidth=4):
+def _clip(idx, n):
+    """An IDL subscript array: out-of-range elements are clipped to the ends."""
+    return np.clip(np.asarray(idx, dtype=np.int64), 0, n - 1)
+
+
+def meancomb_stackmask(data, mask, datavar=None, robust=None, rms=False):
+    """
+    MC_MEANCOMB of the spectra in use (`data`, nz rows) with the pixel mask
+    of the full stack (`mask`, nspec >= nz rows), as XCOMBSPEC and MC_SPECCOR
+    call it once a spectrum is removed. The IDL then works by subscripts:
+    the outlier flags of row r go to mask row r, the masked pixels are found
+    as positions in the full mask and zeroed in the smaller array with
+    subscripts clipped to its last element, and the unweighted mean divides
+    by the count of the full mask's rows. With equal sizes this is MC_MEANCOMB.
+    Returns (mean, variance, ogoodbad), ogoodbad with the full mask's rows.
+    """
+    data = np.asarray(data)
+    mask = np.asarray(mask)
+    if mask.shape == data.shape:
+        return I.meancomb(data, datavar=datavar, mask=mask, robust=robust, rms=rms)
+    P = np.float32 if I.isf32(data) else np.float64
+    data = data.astype(P)
+    imask = mask.copy()
+    if robust is not None:
+        for i in range(data.shape[1]):
+            r = I.findoutliers(data[:, i], robust)
+            imask[np.where(r == 0)[0], i] = 0
+    zf = np.flatnonzero(imask == 0)                 # WHERE(imask eq 0): full-stack positions
+    with np.errstate(divide="ignore", invalid="ignore"):
+        if datavar is not None:
+            V = np.float32 if I.isf32(datavar) else np.float64
+            datavar = np.asarray(datavar).astype(V)
+            tmp = (V(1.) / datavar)
+            if zf.size:
+                tmp.flat[_clip(zf, tmp.size)] = 0
+            mvar = 1.0 / I._seqsum0(tmp)
+            tmp = data / datavar
+            if zf.size:
+                tmp.flat[_clip(zf, tmp.size)] = 0
+            mean = I._seqsum0(tmp) * mvar
+        else:
+            idata = data.copy()
+            if zf.size:
+                idata.flat[_clip(zf, idata.size)] = P(0)
+            ndat = I._seqsum0(imask).astype(np.float32)          # over the full stack
+            mean = I._seqsum0(idata) / ndat
+            mvar = (I._seqsum0(I.sq(idata.astype(float))) - ndat * I.sq(mean)) / (ndat - np.float32(1))
+            if not rms:
+                mvar = mvar / ndat
+    return mean.astype(np.float32), mvar.astype(np.float32), imask
+
+
+def medcomb_stackmask(data, mask, mad=False):
+    """
+    MC_MEDCOMB with the pixel mask of the full stack: for each pixel the
+    rows the mask keeps are taken from the spectra in use by subscript,
+    clipped to the last one (so it can count twice), and the variance is
+    divided by the full mask's count. With equal sizes this is MC_MEDCOMB.
+    """
+    data = np.asarray(data)
+    mask = np.asarray(mask)
+    if mask.shape == data.shape:
+        return I.medcomb(data, mask=mask, mad=mad)
+    P = np.float32 if I.isf32(data) else np.float64
+    data = data.astype(P)
+    nz, ncols = data.shape
+    k = np.float32(1.4826)
+    med = np.zeros(ncols, dtype=np.float32)                   # FLTARR
+    var = np.zeros(ncols, dtype=np.float32)
+    for i in range(ncols):
+        z = np.where(mask[:, i] == 1)[0]
+        ngood = z.size
+        if ngood == 0:
+            z = np.array([-1])                                # WHERE's -1
+        col = data[_clip(z, nz), i]
+        med[i] = I.median(col, even=True)
+        v = I.sq(k * I.median(np.abs(col - med[i]), even=True))
+        if not mad:
+            with np.errstate(divide="ignore"):
+                v = np.float32(v) / np.float32(ngood)
+        var[i] = v
+    var[var == 0] = 1.
+    return med, var
+
+
+def correct_shapes(loaded, aperture=1, spcmask=None, fwidth=4, intended_masks=False):
     """
     XCOMBSPEC_CORRECTSPEC: MC_SPECCOR on every order of one aperture.
 
     As MC_SPECCOR does: the robust mean uses the pixel mask of the full stack
-    against the spectra in use, the corrected stack is a zeroed FLTARR filled
-    only where the mean spectrum is finite (other pixels come back 0), and
-    the low-frequency ratio comes from IDL's FFT (here numpy's; see
-    docs/validation.md). The errors keep their values outside those pixels.
+    against the spectra in use (see meancomb_stackmask: with a spectrum
+    removed, the mean is scaled by nkept/nspec and the masks shift), the
+    corrected stack is a zeroed FLTARR filled only where the mean spectrum
+    is finite (other pixels come back 0), and the low-frequency ratio comes
+    from IDL's FFT (here numpy's; see docs/validation.md). The errors keep
+    their values outside those pixels.
+
+    XCOMBSPEC passes the pixel masks of all apertures; with two or more
+    apertures (not combined) that array is 3-D, MC_SPECCOR's argument check
+    rejects it and nothing is corrected. Likewise one spectrum alone (a 1-D
+    stack). Then this returns False and leaves the spectra as they are.
+    `intended_masks=True` (not what IDL does) uses each order's own mask of
+    this aperture, the kept spectra's rows only, and corrects in those cases.
     """
-    spc = loaded["spc"][aperture - 1]
+    ap = aperture - 1
+    if loaded["modspec"][ap] >= 3:
+        raise ValueError("Cannot perform this operation again. Please reload spectra and start over.")
+    spc = loaded["spc"][ap]
+    if not intended_masks and (loaded["naps"] > 1 or spc[0].shape[0] < 2):
+        return False
     for j in range(len(loaded["orders"])):
         stack = spc[j][:, 1, :]
         err = spc[j][:, 2, :]
         nf, ncols = stack.shape
-        specmask = (np.ones(nf, np.float32) if spcmask is None
-                    else np.asarray(spcmask[j] if np.ndim(spcmask) > 1 else spcmask, np.float32))
+        if spcmask is not None:
+            specmask = np.asarray(spcmask[j] if np.ndim(spcmask) > 1 else spcmask, np.float32)
+        else:
+            specmask = np.asarray(loaded["spcmask"][ap][j], np.float32)
+        pixmask = np.asarray(loaded["pixmask"][ap][j], np.float32)
         z = np.where(specmask == 1)[0]
-        meanspec, _, npm = I.meancomb(stack[z], robust=3,
-                                      mask=np.ones((z.size, ncols), dtype=int))
+        if intended_masks:
+            meanspec, _, npm_z = I.meancomb(stack[z], robust=3, mask=pixmask[z])
+            npm = np.ones((nf, ncols), dtype=np.float32)
+            npm[z] = npm_z
+        else:
+            meanspec, _, npm = meancomb_stackmask(stack[z], pixmask, robust=3)
         tstack = stack.copy()
         for i in range(nf):
             if not specmask[i]:
                 continue
-            if i < npm.shape[0]:
-                bad = npm[i] == 0
-                tstack[i, bad] = meanspec[bad]
+            bad = npm[i] == 0
+            tstack[i, bad] = meanspec[bad]
         x = np.arange(ncols, dtype=np.float32)
         for i in range(nf):
             tstack[i] = robustsg(x, tstack[i], 10, 5, 0.1)[1]
@@ -279,15 +493,24 @@ def correct_shapes(loaded, aperture=1, spcmask=None, fwidth=4):
             err[i, good] = (err[i, good] * ratio).real
         stack[:, :] = cstack
     loaded.setdefault("corrected", {})[aperture] = True
+    loaded["modspec"][ap] = 3
+    return True
 
 
 def combine(loaded, statistic="Robust Weighted Mean", thresh=8.0, spcmask=None,
-            pixmask=None):
+            pixmask=None, intended_masks=False):
     """
     XCOMBSPEC_COMBINESPEC: one spectrum per order and aperture.
 
-    `spcmask`, per aperture and order, switches whole spectra off; `pixmask`,
-    per aperture and order, is an (nfiles, npix) array of 1 (use) and 0 (prune).
+    The masks are those Prune Spectra set (prune()); `spcmask`, per
+    aperture and order, and `pixmask`, per aperture and order an
+    (nspec, npix) array of 1 (use) and 0 (prune), replace them when given.
+    As XCOMBSPEC does, the statistics get the spectra in use but the pixel
+    mask of the full stack, so with a spectrum removed an unweighted mean
+    is divided by the full count, a median takes the last spectrum twice,
+    and the flags are combined from subscript-clipped rows (see
+    meancomb_stackmask, medcomb_stackmask). `intended_masks=True` (not what
+    IDL does) gives every statistic only the kept spectra's mask rows.
     """
     stat = STATISTICS.index(statistic)
     orders, naps = loaded["orders"], loaded["naps"]
@@ -297,43 +520,51 @@ def combine(loaded, statistic="Robust Weighted Mean", thresh=8.0, spcmask=None,
         for j in range(len(orders)):
             st = loaded["spc"][i][j]
             nf = st.shape[0]
-            m = np.ones(nf, dtype=int) if spcmask is None else np.asarray(spcmask[i][j])
+            m = np.asarray(loaded["spcmask"][i][j] if spcmask is None else spcmask[i][j])
             z = np.where(m == 1)[0]
             spec = st[z, 1, :]
             err = st[z, 2, :]
             flag = st[z, 3, :]
-            mask = np.ones(spec.shape, dtype=int) if pixmask is None else np.asarray(pixmask[i][j])[z]
+            full = np.asarray(loaded["pixmask"][i][j] if pixmask is None else pixmask[i][j]).astype(int)
+            mask = full[z] if intended_masks else full
+            mc = I.meancomb if intended_masks else meancomb_stackmask
+            md = (lambda d, mask, mad=False: I.medcomb(d, mask=mask, mad=mad)) \
+                if intended_masks else medcomb_stackmask
             ogb = None
             if stat == 0:
-                mean, mvar, ogb = I.meancomb(spec, datavar=I.sq(err), mask=mask, robust=thresh)
+                mean, mvar, ogb = mc(spec, datavar=I.sq(err), mask=mask, robust=thresh)
             elif stat == 1:
-                mean, mvar, ogb = I.meancomb(spec, rms=True, mask=mask, robust=thresh)
+                mean, mvar, ogb = mc(spec, rms=True, mask=mask, robust=thresh)
             elif stat == 2:
-                mean, mvar, ogb = I.meancomb(spec, mask=mask, robust=thresh)
+                mean, mvar, ogb = mc(spec, mask=mask, robust=thresh)
             elif stat == 3:
-                mean, mvar, _ = I.meancomb(spec, datavar=I.sq(err), mask=mask)
+                mean, mvar, _ = mc(spec, datavar=I.sq(err), mask=mask)
             elif stat == 4:
-                mean, mvar, _ = I.meancomb(spec, rms=True, mask=mask)
+                mean, mvar, _ = mc(spec, rms=True, mask=mask)
             elif stat == 5:
-                mean, mvar, _ = I.meancomb(spec, mask=mask)
+                mean, mvar, _ = mc(spec, mask=mask)
             elif stat == 6:
-                mean, mvar = I.medcomb(spec, mask=mask, mad=True)
+                mean, mvar = md(spec, mask, mad=True)
             elif stat == 7:
-                mean, mvar = I.medcomb(spec, mask=mask)
+                mean, mvar = md(spec, mask)
             else:
-                # TOTAL(..., 2, /NAN): in order down the stack, NaNs skipped
-                sm = spec * mask
+                # TOTAL(..., 2, /NAN): in order down the stack, NaNs skipped;
+                # spec*mask has the smaller array's size (the first mask rows)
+                sm = spec * mask[:spec.shape[0]]
                 mean = np.array([I.ftotal(c[np.isfinite(c)]) for c in sm.T])
-                ev = mask * I.sq(err.astype(float))
+                ev = mask[:spec.shape[0]] * I.sq(err.astype(float))
                 mvar = np.array([I.itotal(c[np.isfinite(c)]) for c in ev.T])
             n = j * naps + i
             out[n, 0] = st[0, 0]
             out[n, 1] = mean
             out[n, 2] = np.sqrt(mvar)
-            tmp = (mask * np.nan_to_num(flag).astype(np.uint8))
+            # mask*BYTE(flag), then *ogoodbad: each product the smaller size
+            fl = np.nan_to_num(flag).astype(np.uint8)
+            tmp = mask[:fl.shape[0]] * fl
             if stat <= 2:
-                tmp = tmp * ogb
-            out[n, 3] = combflagstack(tmp)
+                tmp = tmp * ogb[:fl.shape[0]]
+            rows = np.arange(tmp.shape[0]) if intended_masks else _clip(z, tmp.shape[0])
+            out[n, 3] = combflagstack(tmp[rows])
     loaded["combined"] = out
     loaded["statistic"] = statistic
     loaded["thresh"] = thresh
@@ -477,36 +708,70 @@ def avehdrs(infos, time_obs="UT", posangle="ROTANG", ha="HA", airmass="AIRMASS")
     return vals, coms
 
 
-def write(path, loaded):
+def history(loaded, basic=False):
+    """
+    XCOMBSPEC_WRITEFILE's history text: per aperture the files sentence,
+    the scale factors (only when that aperture was scaled), the spectra
+    removed from each order and the shape correction, then the statistic.
+    The removed files are named by FILES[z]; with the apertures combined z
+    counts spectra, not files, and the subscripts are clipped, as in IDL.
+    """
+    files = [os.path.basename(f) for f in loaded["files"]]
+    hist = "This FITS header is from the first spectrum in the stack.  " if basic else ""
+    for i in range(loaded["naps"]):
+        ap = i + 1
+        hist += "  The files " + ", ".join(files) + " were combined.  "
+        hist += f"  Aperture {ap:02d} Info: "
+        if ap in loaded.get("scaleorder", {}):
+            hist += (f"The scale factors were determined using order {int(loaded['scaleorder'][ap]):02d}"
+                     ".  The scale factors are "
+                     + ", ".join(_idlstring(np.float32(v)).strip() for v in loaded["scales"][ap])
+                     + ".  The median RMS deviation in each order is "
+                     + ", ".join(_idlstring(np.float32(v)).strip() for v in loaded["medrms"][ap])
+                     + ".  ")
+        for j, o in enumerate(loaded["orders"]):
+            z = np.where(np.asarray(loaded["spcmask"][i][j]) == 0)[0]
+            if z.size:
+                hist += ("  The spectrum(a) from file(s) "
+                         + ", ".join(files[k] for k in _clip(z, len(files)))
+                         + f" was (ere) removed from order {int(o):02d}.")
+        if loaded.get("corrected", {}).get(ap):
+            hist += "  The spectral shapes have been corrected.  "
+    hist += "The spectra were combined using a " + loaded["statistic"] + ".  "
+    if STATISTICS.index(loaded["statistic"]) <= 2:
+        hist += "The robust threshold was " + _idlstring(np.float32(loaded["thresh"])).strip() + "."
+    return hist
+
+
+def write(path, loaded, basic=False):
     """
     XCOMBSPEC_WRITEFILE: the first spectrum's header through MC_AVEHDRS,
     every value written back by FXADDPAR in the type FXPAR gave it, the
-    history, ITOT (a FLOAT field) and the file name.
+    earlier history under 'Xspextool History', XCOMBSPEC's own under
+    'Xcombspec History' (MC_SPLITTEXT at 70 characters), ITOT (a FLOAT
+    field) and the file name. `basic` is xcombspec,/BASIC: the first
+    header as it is, not averaged, and a sentence saying so.
     """
     first = loaded["headers"][0]
     # XCOMBSPEC_LOADSPEC replicates the first header for every file
-    vals, coms = avehdrs([gethdrinfo(first)] * len(loaded["headers"]))
+    infos = [gethdrinfo(first)] * len(loaded["headers"])
+    if basic:
+        vals, coms = dict(infos[0][0]), dict(infos[0][1])
+    else:
+        vals, coms = avehdrs(infos)
     vals["NAPS"] = type(vals["NAPS"])(loaded["naps"]) if "NAPS" in vals else loaded["naps"]
     hdr = fits.Header()
     for k, v in vals.items():
         if k in ("SIMPLE", "BITPIX", "EXTEND") or k.startswith("NAXIS"):
             continue                         # the data's own, set on writing
         if k == "HISTORY":
+            I.addhistlabel(hdr, "Xspextool History")
             for j in range(0, len(v), 70):
-                hdr.add_history(v[j:j + 70])
+                I.addhistory(hdr, v[j:j + 70])              # FXADDPAR 'HISTORY'
             continue
         I.fxaddpar(hdr, k, v, coms[k])
-    hist = "The files " + ", ".join(os.path.basename(f) for f in loaded["files"]) + " were combined."
-    for ap, order in loaded.get("scaleorder", {}).items():
-        hist += (f"  Aperture {ap:02d} Info: The scale factors were determined using order "
-                 f"{order:02d}.  The scale factors are "
-                 + ", ".join(_idlstring(np.float32(s)).strip() for s in loaded["scales"][ap])
-                 + ".  The median RMS deviation in each order is "
-                 + ", ".join(_idlstring(np.float32(s)).strip() for s in loaded["medrms"][ap]) + ".")
-    hist += f"  The spectra were combined using a {loaded['statistic']}."
-    if STATISTICS.index(loaded["statistic"]) <= 2:
-        hist += f"  The robust threshold was {_idlstring(np.float32(loaded['thresh'])).strip()}."
-    hdr.add_history("Xcombspec History: " + hist)
+    I.addhistlabel(hdr, "Xcombspec History")
+    I.sxaddhist(hdr, history(loaded, basic=basic))
     I.fxaddpar(hdr, "ITOT", np.float32(loaded["itot"]), " Total integration time (sec)")
     I.fxaddpar(hdr, "FILENAME", os.path.basename(path), coms.get("FILENAME", ""))
     fits.PrimaryHDU(loaded["combined"], header=hdr).writeto(path, overwrite=True)

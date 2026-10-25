@@ -36,8 +36,11 @@ regions where the background is measured.
   **Radius** larger and push **Background start** out.
 :::
 
-Press **Extract every pair**. Each pair writes two spectra (`HD225200_1_spec0116.fits` for
-A, `…0117.fits` for B); click one in the list to plot it.
+Press **Extract every pair**. With the background subtracted (the default), each star is
+extracted **optimally**, as in the IDL tool: its profile, measured from the image, weights
+the pixels within the PSF radius (2.2″), and the flux of the whole star is returned (see
+[extraction](../science/extraction.md#measuring-the-light)). Each pair writes two spectra
+(`HD225200_1_spec0116.fits` for A, `…0117.fits` for B); click one in the list to plot it.
 
 ## An extended source: NGC 134
 

@@ -57,50 +57,53 @@ Next, the wavelengths. A sky spectrum is extracted from each order and cross-cor
 00:03:37.298 --> 00:03:46.382
 Then each line is followed along the slit, to map how the slit's image is tilted. The result is a wavelength, and a slit position, for every pixel.
 
-00:03:48.562 --> 00:03:55.329
+00:03:48.582 --> 00:03:55.484
 Now extraction. For every pair, B is subtracted from A and the result divided by the flat.
 
-00:03:55.410 --> 00:04:08.505
-A spatial profile shows where the light falls along the slit. Apertures are placed on the target, the light left between them is fitted as background and removed, and the flux inside each aperture is summed, at every wavelength.
+00:03:55.544 --> 00:04:04.787
+A spatial profile shows where the light falls along the slit. Apertures are placed on the target, and the light left between them is fitted as background and removed.
 
-00:04:10.665 --> 00:04:18.408
+00:04:04.827 --> 00:04:15.910
+A star is then measured optimally: its own profile weights every pixel near it, giving the whole star's flux at the best signal to noise. An extended source is summed inside its apertures.
+
+00:04:18.090 --> 00:04:25.833
 The spectra of one target are then combined. They are first scaled to a common level, because the seeing and the guiding change during a sequence.
 
-00:04:18.508 --> 00:04:28.251
+00:04:25.933 --> 00:04:35.676
 Then, at every wavelength, a robust weighted mean rejects the outliers and weights the rest by their errors. The signal to noise grows as the square root of the number of spectra.
 
-00:04:30.411 --> 00:04:39.540
+00:04:37.836 --> 00:04:46.965
 The telluric correction is the heart of the reduction. What we recorded of the galaxy is its true spectrum, times the atmosphere, times the instrument.
 
-00:04:39.460 --> 00:04:52.452
+00:04:46.885 --> 00:04:59.877
 An A0 V star went through the same atmosphere and instrument minutes earlier, and its true spectrum is known: it looks like Vega's, which has been modelled in detail. So the model divided by the observed star is exactly the correction.
 
-00:04:54.612 --> 00:05:02.376
+00:05:02.037 --> 00:05:09.801
 The catch is the star's own deep hydrogen lines. Vega's model lines must first match them exactly, as TripleSpec saw them.
 
-00:05:02.396 --> 00:05:15.603
+00:05:09.821 --> 00:05:23.028
 Vega is shifted to the star's velocity, and a convolution kernel is found by dividing the Fourier transforms of the two lines. Convolved with that kernel, Vega's line lies on the star's, to within a percent or two.
 
-00:05:17.763 --> 00:05:27.549
+00:05:25.188 --> 00:05:34.974
 With the kernel, Vega's model is rebuilt for every order, scaled to the star's magnitude, and divided by the observed star: the telluric spectrum.
 
-00:05:27.609 --> 00:05:38.795
+00:05:35.034 --> 00:05:46.220
 Slid by a fraction of a pixel to line up with the galaxy's features, it multiplies the galaxy's spectrum, removing the atmosphere and giving it physical flux units at once.
 
-00:05:41.035 --> 00:05:51.903
+00:05:48.460 --> 00:05:59.328
 Last, the five orders are merged. They overlap at their ends, and are joined one by one, the overlaps averaged with weights from their errors, into one continuous spectrum.
 
-00:05:54.124 --> 00:06:02.713
+00:06:01.549 --> 00:06:10.138
 Every file is named after its source and its step, in Spextool's own format, and every step keeps a log of its settings and its results.
 
-00:06:02.774 --> 00:06:08.620
+00:06:10.199 --> 00:06:16.045
 The whole night can be reduced with one button, or step by step, with every step explaining itself.
 
-00:06:10.880 --> 00:06:26.645
+00:06:18.305 --> 00:06:34.070
 Every product was compared with the IDL tool's on the same frames: the flat, the wavelength solution, every extracted spectrum, the combined, corrected and merged spectra, even every number in every header. They are identical, bit for bit.
 
-00:06:26.605 --> 00:06:34.867
+00:06:34.030 --> 00:06:42.292
 The one exception is the telluric kernel, made with IDL's own Fourier transform, which agrees to a few parts in a million.
 
-00:06:34.727 --> 00:06:40.449
+00:06:42.152 --> 00:06:47.874
 The documentation has the tutorial, the science of every step, and every source it rests on.

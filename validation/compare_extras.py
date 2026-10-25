@@ -53,7 +53,8 @@ with fits.open(pb) as h:
     stat("its variance", _rot(h[2].data, fl["rotation"]), fits.getdata(os.path.join(REF, "ci_bg_var.fits")))
 
 r = E.reduce_pair([], fl, wc, [os.path.join(OUT, "HD225200_ci_spec.fits")], source="point",
-                  atran=read_atran(fl["rp"]), mode="A", combined=p)
+                  atran=read_atran(fl["rp"]), mode="A", combined=p,
+                  optimal=False)              # ref_extras.pro: sum with background
 print("   positions\n", np.round(r["positions"], 5), "\n   signs", r["signs"],
       "(IDL CI_POS 9.87706 28.0891 ... signs 1 -1)")
 k = 0

@@ -16,8 +16,14 @@ the telluric absorption and calibrates the flux.
                                            every order); or the IP method
     line scales    XMC_SCALELINES         control points at every H I line
     telluric       MC_MKTELLSPEC          per order, cut regions bridged
-    shift          XMC_FINDSHIFT          sub-pixel shift per order
-    write          XTELLCOR_WRITEFILE
+    shift          XMC_FINDSHIFT          sub-pixel shift per order and aperture
+    write          XTELLCOR_WRITEFILE     corrected, telluric and (Model) Vega files
+
+and the two other ways XTELLCOR offers:
+
+    any standard   XTELLCOR_BASIC         divide by the star, optionally times
+                                          a blackbody of given T scaled to V
+    existing file  XTELLCOR_FINISH        a telluric file applied to another object
 
 XMC_CONKERN keeps a copy of the second Vega continuum under the name of the
 first (`fc2vega:fcvega` in its state), so the velocity and the normalized
@@ -602,11 +608,22 @@ def contellspec(st, units="ergs s-1 cm-2 A-1"):
 
 # ------------------------------------------------------------- shift
 
-def findshift(objwave, objflux, telflux, srange, initshift=0.0):
+def findshift(objwave, objflux, telflux, srange=None, initshift=0.0):
     """
     XMC_FINDSHIFT_AUTOFIND: the shift of the telluric spectrum, in pixels,
     that leaves the least structure in object x telluric over `srange`.
+
+    As XMC_FINDSHIFT_SETUP does first, the object is divided by the maximum
+    of its 4-pixel running median; without `srange` the region is the whole
+    order (XMC_FINDSHIFT's default before a region is selected with 's').
     """
+    objwave = np.asarray(objwave)
+    objflux = np.asarray(objflux)
+    smooth = I.median_filter(objflux, 4)
+    objflux = objflux / np.asarray(np.nanmax(smooth)).astype(objflux.dtype)
+    if srange is None:
+        srange = [np.nanmin(objwave), np.nanmax(objwave)]
+    srange = np.asarray(srange, dtype=np.float32)          # FLOAT state field
     z = (objwave > srange[0]) & (objwave < srange[1])
     shifts = np.arange(151, dtype=np.float32) / np.float32(50.) + np.float32(initshift - 1.5)
     rms = np.zeros(151, dtype=np.float32)
@@ -646,8 +663,43 @@ def getshift(st, order, aperture=1, srange=None):
 
 # ------------------------------------------------------------- output
 
-def corrected(st, propstdunc=True):
-    """XTELLCOR_WRITEFILE: the object corrected by the (shifted) telluric spectrum."""
+def set_shift(st, order, aperture, value):
+    """
+    The shift of one object order and aperture, as typed in XMC_FINDSHIFT's
+    'Shift' field (a FLOAT). XTELLCOR keeps one shift per order and per
+    aperture; set every aperture's own.
+    """
+    st["shift"][st["objorders"].index(order), aperture - 1] = np.float32(value)
+
+
+def shifts_array(st, shifts):
+    """
+    `shifts` as XTELLCOR's FLTARR(norders, naps): an array of that shape, or
+    a dict {(order, aperture): pixels} (apertures from 1; missing ones 0).
+    """
+    norders, naps = len(st["objorders"]), st["objnaps"]
+    if isinstance(shifts, dict):
+        out = np.zeros((norders, naps), dtype=np.float32)
+        for (o, ap), v in shifts.items():
+            out[st["objorders"].index(o), ap - 1] = np.float32(v)
+        return out
+    out = np.asarray(shifts, dtype=np.float32)
+    if out.shape != (norders, naps):
+        raise ValueError(f"shifts must be ({norders}, {naps}): one per order and aperture")
+    return out
+
+
+def corrected(st, propstdunc=True, shifts=None):
+    """
+    XTELLCOR_WRITEFILE: the object corrected by the (shifted) telluric spectrum.
+
+    The shifts are st["shift"] (norders, naps), or `shifts` (see
+    shifts_array), which then replace them. `propstdunc=False` (XTELLCOR's
+    'Propagate Std Uncertainty', whose widget TS4_SOAR's XTELLCOR does not
+    show; always on there) leaves the standard's error out.
+    """
+    if shifts is not None:
+        st["shift"] = shifts_array(st, shifts)
     obj = st["obj"]["spec"]
     out = obj.copy()
     for i, o in enumerate(st["objorders"]):
@@ -687,13 +739,30 @@ def _fstr(v):
     return f"{float(np.float32(v)):#13.6g}".strip()
 
 
-def write(path, st, tellpath=None, vegapath=None, std_name=None):
+def output_names(path):
+    """
+    The names XTELLCOR_WRITEFILE gives its three files for output name
+    `obj` (path without .fits): obj.fits, obj_tellspec.fits ('Telluric',
+    on by default) and obj_modVega.fits ('Model', off by default).
+    """
+    base = path[:-5] if path.endswith(".fits") else path
+    return base + ".fits", base + "_tellspec.fits", base + "_modVega.fits"
+
+
+def write(path, st, tellpath=None, vegapath=None, std_name=None, model=False):
     """
     XTELLCOR_WRITEFILE: the corrected spectrum (the object's header kept as
     it is, a few keywords removed, XTELLCOR's added), and optionally the
     telluric and modified-Vega spectra with headers of their own. The
     values come from XTELLCOR's FLOAT state fields.
+
+    `model=True` ('Additional output: Model') writes the convolved, scaled
+    Vega model to `vegapath`, by default XTELLCOR's name for it
+    (output_names). Its IRAFNAME is XTELLCOR's: for a file named
+    obj_modVega.fits it reads obj_modvega.fits.
     """
+    if model and not vegapath:
+        vegapath = output_names(path)[2]
     f32 = np.float32
     units = st.get("units", "ergs s-1 cm-2 A-1")
     ohdr, shdr = st["obj"]["header"], st["std"]["header"]
@@ -750,13 +819,19 @@ def write(path, st, tellpath=None, vegapath=None, std_name=None):
         fits.PrimaryHDU(st["tellspec"], header=th).writeto(tellpath, overwrite=True)
     if vegapath:
         vh = fits.Header()
-        I.fxaddpar(vh, "IRAFNAME", os.path.basename(vegapath))
+        vname = os.path.basename(vegapath)
+        if vname.endswith("_modVega.fits"):
+            vname = vname[:-len("_modVega.fits")] + "_modvega.fits"     # strtrim(obj+'_modvega.fits')
+        I.fxaddpar(vh, "IRAFNAME", vname)
         I.fxaddpar(vh, "ORDERS", I.fxpar(ohdr, "ORDERS"), I.fxcomment(ohdr, "ORDERS"))
         I.fxaddpar(vh, "NORDERS", I.fxpar(ohdr, "NORDERS"), I.fxcomment(ohdr, "NORDERS"))
         I.fxaddpar(vh, "OBJECT", "Convolved Vega Spectrum")
-        # FXPAR of the standard's GRAT, which TripleSpec spectra do not have: 0
-        I.fxaddpar(vh, "GRAT", I.fxpar(shdr, "GRAT") if "GRAT" in shdr else 0,
-                   I.fxcomment(shdr, "GRAT") if "GRAT" in shdr else "")
+        # FXPAR of the standard's GRAT, which TripleSpec spectra do not have: 0;
+        # a keyword FXPAR does not find leaves COMMENT= as it was, so the
+        # comments are those the telluric file's block read (MODENAME's)
+        cgrat = I.fxcomment(shdr, "GRAT") if "GRAT" in shdr else (
+            I.fxcomment(shdr, "MODENAME") if tellpath else "")
+        I.fxaddpar(vh, "GRAT", I.fxpar(shdr, "GRAT") if "GRAT" in shdr else 0, cgrat)
         I.fxaddpar(vh, "NAPS", 1, " Number of apertures")
         hist = ("This Vega spectrum has been scaled to a V magnitude of " + _fstr(vmag)
                 + ", shifted by " + _fstr(vshift) + " km s-1, convolved with the kernel and "
@@ -769,7 +844,8 @@ def write(path, st, tellpath=None, vegapath=None, std_name=None):
             hist += " The Vega model was modified using the IP method."
         I.fxaddpar(vh, "XUNITS", I.fxpar(shdr, "XUNITS"), I.fxcomment(shdr, "XUNITS"))
         I.fxaddpar(vh, "XTITLE", I.fxpar(shdr, "XTITLE") if "XTITLE" in shdr else 0,
-                   I.fxcomment(shdr, "XTITLE") if "XTITLE" in shdr else "")
+                   I.fxcomment(shdr, "XTITLE") if "XTITLE" in shdr else (
+                       "IDL X Title" if tellpath else ""))
         I.fxaddpar(vh, "YUNITS", units.replace(" ", ""), "Units of the Y axis")
         I.fxaddpar(vh, "YTITLE", nyt + ")", "IDL Y title")
         add_history(vh, "Xtellcor History", hist)
@@ -806,28 +882,62 @@ def write(path, st, tellpath=None, vegapath=None, std_name=None):
     fits.PrimaryHDU(st["corrected"], header=hdr).writeto(path, overwrite=True)
 
 
-def apply_telluric(tellspec_path, obj_path, shifts=None):
-    """
-    XTELLCOR_FINISH: correct another object with an existing telluric file.
+# ------------------------------------------------------------- an existing telluric file
 
-    Reproduced as written, two differences from XTELLCOR included: the error
-    is computed after the flux has been corrected, so its second term uses
-    the corrected flux; and an object order with no telluric counterpart
-    ends the loop (IDL: goto, cont), leaving the orders after it as they
-    were. The pixel shift is applied on the telluric file's own grid.
+def load_finish(tel_file, obj_file):
     """
-    with fits.open(tellspec_path) as h:
-        tel = h[0].data.astype(float)
-        thdr = h[0].header
-    obj = read_spectrum(obj_path)
-    spec = obj["spec"].copy()
-    torders = [int(t) for t in str(thdr["ORDERS"]).split(",")]
-    naps = obj["naps"]
-    sh = np.zeros((len(obj["orders"]), naps)) if shifts is None else np.asarray(shifts, float)
-    for i, o in enumerate(obj["orders"]):
-        if o not in torders:
+    XTELLCOR_FINISH_LOADSPEC: a telluric file XTELLCOR wrote and an object,
+    both as MC_READSPEC reads them (the object is not given a flag column),
+    shifts 0, the ATRAN model for the object's resolving power, and the
+    airmass difference (a FLOAT) with XTELLCOR's warning above 0.1.
+    """
+    tel = read_spectrum(tel_file)
+    obj = read_spectrum(obj_file)
+    aw, at = read_atran(obj["rp"])
+    st = dict(tel=tel, obj=obj, tel_path=tel_file, telorders=tel["orders"],
+              objorders=obj["orders"], objnaps=obj["naps"], awave=aw, atrans=at,
+              dairmass=np.float32(tel["airmass"] - obj["airmass"]),
+              shift=np.zeros((len(obj["orders"]), obj["naps"]), dtype=np.float32))
+    st["airmass_warning"] = abs(tel["airmass"] - obj["airmass"]) > 0.1
+    return st
+
+
+def getshift_finish(st, order, aperture=1, srange=None):
+    """XTELLCOR_FINISH_GETSHIFT: XMC_FINDSHIFT on the object and the telluric spectrum."""
+    zo = st["objorders"].index(order)
+    k = zo * st["objnaps"] + (aperture - 1)
+    ow, of = st["obj"]["spec"][k, 0], st["obj"]["spec"][k, 1]
+    t = _nantrim(ow, 2)
+    ow, of = ow[t], of[t]
+    z = st["telorders"].index(order)
+    tw, tf = st["tel"]["spec"][z, 0], st["tel"]["spec"][z, 1]
+    t = _nantrim(tw, 2)
+    nf, _ = interpspec(tw[t], tf[t], ow)
+    sh, curve = findshift(ow, of, nf, srange, st["shift"][zo, aperture - 1])
+    st["shift"][zo, aperture - 1] = sh
+    return sh, curve
+
+
+def tellcor_finish(st, shifts=None):
+    """
+    XTELLCOR_FINISH_TELLCOR: the object times the shifted telluric spectrum.
+
+    As written there: no flags are combined; the error is computed after the
+    flux has been corrected, so its second term uses the corrected flux; an
+    object order with no telluric counterpart ends the loop (goto, cont),
+    leaving it and the orders after it as they were. The shift runs on the
+    telluric file's pixel grid against the object-length spectrum: MC_INTERPSPEC
+    keeps the pixels where both are finite, which truncates to the shorter.
+    """
+    if shifts is not None:
+        st["shift"] = shifts_array(st, shifts)
+    tel = st["tel"]["spec"]
+    spec = st["obj"]["spec"].copy()
+    naps = st["objnaps"]
+    for i, o in enumerate(st["objorders"]):
+        if o not in st["telorders"]:
             break
-        z = torders.index(o)
+        z = st["telorders"].index(o)
         for j in range(naps):
             k = i * naps + j
             nflux, nerror = interpspec(tel[z, 0], tel[z, 1], spec[k, 0], iyerror=tel[z, 2])
@@ -835,12 +945,233 @@ def apply_telluric(tellspec_path, obj_path, shifts=None):
             if no > nt:
                 raise ValueError("XTELLCOR_FINISH cannot apply a telluric spectrum shorter than "
                                  "the object's (IDL stops with a size mismatch).")
-            # x runs over the telluric grid; IDL clamps the object-length
-            # flux's out-of-range subscripts to its last element.
-            pad = lambda a: np.concatenate([a, np.full(nt - no, a[-1])]) if nt > no else a
             x = np.arange(nt, dtype=np.float32)
-            nnflux, nnerror = interpspec(x + sh[i, j], pad(nflux), x, iyerror=pad(nerror))
+            m = min(nt, no)
+            nnflux, nnerror = interpspec((x + st["shift"][i, j])[:m], nflux[:m], x,
+                                         iyerror=nerror[:m])
             nnflux, nnerror = nnflux[:no], nnerror[:no]
             spec[k, 1] = nnflux * spec[k, 1]
             spec[k, 2] = np.sqrt(I.sq(nnflux) * I.sq(spec[k, 2]) + I.sq(spec[k, 1]) * I.sq(nnerror))
-    return spec, thdr, obj["header"]
+    st["corrected"] = spec
+    return spec
+
+
+def _idlstr(v):
+    """STRTRIM(v, 2) of a number FXPAR returned: FLOAT %#13.6g, DOUBLE %#16.8g, integers."""
+    if isinstance(v, (int, np.integer)):
+        return str(int(v))
+    return (f"{float(v):#13.6g}" if I.isf32(v) else f"{float(v):#16.8g}").strip()
+
+
+def write_finish(path, st):
+    """
+    XTELLCOR_FINISH_TELLCOR's file: the object's header, a few keywords
+    removed, the telluric file's A0VStd, A0VBmag, A0VVmag, DAIRMASS,
+    TELMETH, VEGADV, TELFILE (its IRAFNAME), TCMAXDEV and TCRMSDEV with
+    their comments, YUNITS and YTITLE up to the '/' of the telluric file's,
+    and the history under 'Xtellcor History'. IRAFNAME is the output name.
+    """
+    thdr = st["tel"]["header"]
+    hdr = st["obj"]["header"].copy()
+    for k in ("DIVISOR", "BEAM", "GRSTCNT", "CALMIR", "DIT", "OSF", "QTH_LAMP",
+              "INC_LAMP", "IR_SRC", "ARG_SRC", "SHUTTER", "AIMAGE", "SKY"):
+        hdr.remove(k, ignore_missing=True, remove_all=True)
+    I.fxaddpar(hdr, "IRAFNAME", os.path.basename(path),
+               I.fxcomment(hdr, "IRAFNAME") if "IRAFNAME" in hdr else "")
+    yunits = [t for t in str(I.fxpar(thdr, "YUNITS")).split("/") if t][0]
+    for k in ("A0VStd", "A0VBmag", "A0VVmag", "DAIRMASS"):
+        I.fxaddpar(hdr, k, I.fxpar(thdr, k), I.fxcomment(thdr, k))
+    telmeth = str(I.fxpar(thdr, "TELMETH")).strip()
+    I.fxaddpar(hdr, "TELMETH", telmeth, I.fxcomment(thdr, "TELMETH"))
+    vegadv = I.fxpar(thdr, "Vegadv")
+    I.fxaddpar(hdr, "VEGADV", vegadv, I.fxcomment(thdr, "Vegadv"))
+    telfile = I.fxpar(thdr, "IRAFNAME")
+    I.fxaddpar(hdr, "TELFILE", telfile, I.fxcomment(thdr, "IRAFNAME"))
+    hist = ("This spectrum was telluric corrected using the telluric correction spectra "
+            + str(telfile) + ".  The velocity shift of Vega is " + _idlstr(vegadv) + " km s-1.")
+    if telmeth == "Deconvolution":
+        maxdev = I.fxpar(thdr, "TCMaxDev")
+        I.fxaddpar(hdr, "TCMAXDEV", maxdev, I.fxcomment(thdr, "TCMaxDev"))
+        rmsdev = I.fxpar(thdr, "TCRMSDev")
+        I.fxaddpar(hdr, "TCRMSDEV", rmsdev, I.fxcomment(thdr, "TCRMSDev"))
+        hist += ("  The Vega model was modified using the deconvolution method.  The maximum "
+                 "deviation and rms deviation between the modified Vega model and the data over "
+                 "the kernel wavelength range are " + _idlstr(maxdev) + "% and "
+                 + _idlstr(rmsdev) + "%, respectively.  ")
+    else:
+        hist += "The Vega model was modified using the IP method.  "
+    for j in range(st["objnaps"]):
+        hist += (f"The telluric correction spectra for aperture {j + 1:02d} were shifted by "
+                 + ", ".join(_fstr(s_) for s_ in st["shift"][:, j]) + " pixels.  ")
+    I.fxaddpar(hdr, "YUNITS", yunits, "Units of the Y axis")
+    ytitle = [t for t in str(I.fxpar(thdr, "YTITLE")).split("/") if t][0]
+    I.fxaddpar(hdr, "YTITLE", ytitle + ")", " IDL Y title")
+    I.addhistlabel(hdr, "Xtellcor History")
+    I.sxaddhist(hdr, hist)
+    fits.PrimaryHDU(st["corrected"], header=hdr).writeto(path, overwrite=True)
+
+
+def apply_telluric(tellspec_path, obj_path, shifts=None):
+    """
+    XTELLCOR_FINISH in one call (see load_finish, tellcor_finish): returns
+    the corrected spectrum, the telluric file's header and the object's.
+    """
+    st = load_finish(tellspec_path, obj_path)
+    spec = tellcor_finish(st, shifts=shifts)
+    return spec, st["tel"]["header"], st["obj"]["header"]
+
+
+# ------------------------------------------------------------- any standard: XTELLCOR_BASIC
+
+def load_basic(std_file, obj_file):
+    """
+    XTELLCOR_BASIC_LOADSPEC: a standard of any spectral type and an object,
+    both through MC_CAASPECFLAGS, shifts 0, the ATRAN model for the
+    object's resolving power and the airmass warning (> 0.1; the object's
+    TCS_AM when its AIRMASS is 0).
+    """
+    std = read_spectrum(std_file)
+    obj = read_spectrum(obj_file)
+    for d in (std, obj):
+        d["spec"] = caaspecflags(d["spec"])
+    aw, at = read_atran(obj["rp"])
+    st = dict(std=std, obj=obj, std_path=std_file, stdorders=std["orders"],
+              objorders=obj["orders"], objnaps=obj["naps"], awave=aw, atrans=at,
+              stdairmass=std["airmass"], objairmass=obj["airmass"],
+              shift=np.zeros((len(obj["orders"]), obj["naps"]), dtype=np.float32))
+    st["airmass_warning"] = abs(std["airmass"] - obj["airmass"]) > 0.1
+    return st
+
+
+def getshift_basic(st, order, aperture=1, srange=None):
+    """XTELLCOR_BASIC_GETSHIFT: XMC_FINDSHIFT on the object and 1/standard."""
+    zo = st["objorders"].index(order)
+    k = zo * st["objnaps"] + (aperture - 1)
+    ow, of = st["obj"]["spec"][k, 0], st["obj"]["spec"][k, 1]
+    t = _nantrim(ow, 2)
+    ow, of = ow[t], of[t]
+    z = st["stdorders"].index(order)
+    tw = st["std"]["spec"][z, 0]
+    tf = np.float32(1.) / st["std"]["spec"][z, 1]
+    t = _nantrim(tw, 2)
+    nf, _ = interpspec(tw[t], tf[t], ow)
+    sh, curve = findshift(ow, of, nf, srange, st["shift"][zo, aperture - 1])
+    st["shift"][zo, aperture - 1] = sh
+    return sh, curve
+
+
+def planck(wave, temp):
+    """
+    astrolib PLANCK: the blackbody (erg s-1 cm-2 A-1) at `wave` (A) and
+    `temp` (K), in the types the IDL computes it: the wavelength in cm in
+    the input's precision, the exponent in double, the result stored in a
+    FLOAT array (for float or integer wavelengths).
+    """
+    wave = np.asarray(wave)
+    single = I.isf32(wave) or wave.dtype.kind in "iu"
+    P = np.float32 if single else np.float64
+    w = wave.astype(P) / P(1.E8) if single else wave / np.float64(np.float32(1.E8))
+    c1, c2 = np.float64(3.7417749e-5), np.float64(1.4387687)
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        val = c2 / w / temp
+        good = val < np.log(np.finfo(np.float64).max)              # MACHAR(/DOUBLE).XMAX
+        bb = np.zeros(w.shape, dtype=P)
+        bb[good] = c1 / (I.ipow(w[good], 5) * (np.exp(val[good]) - 1.))
+    return (bb * P(1.E-8)).astype(P)
+
+
+def _basic_units(wave, spec, err, units):
+    """XTELLCOR_BASIC_CHANGEUNITS: its own conversions (c a FLOAT literal) and Y title."""
+    c = np.float32(2.99792458e+8)
+    f = np.float32
+    ang = "!5!sA!r!u!9 %!5!n"
+    if units == "ergs s-1 cm-2 A-1":
+        return spec, err, "!5f!D!7k!N!5 (ergs s!E-1!N cm!E-2!N " + ang + "!E-1!N)"
+    if units == "ergs s-1 cm-2 Hz-1":
+        k = f(1.0e-2) / c
+        return spec * I.sq(wave) * k, err * I.sq(wave) * k, "!5f!D!7m!N!5 (ergs s!E-1!N cm!E-2!N Hz!E-1!N)"
+    if units == "W m-2 um-1":
+        return spec * f(10.), err * f(10.), "!5f!D!7k!N!5 (W m!E-2!N !7l!5m!E-1!N)"
+    if units == "W m-2 Hz-1":
+        k = f(1.0e-5) / c
+        return spec * I.sq(wave) * k, err * I.sq(wave) * k, "!5f!D!7m!N!5 (W m!E-2!N Hz!E-1!N)"
+    if units == "Jy":
+        k = f(1.0e21) / c
+        return spec * I.sq(wave) * k, err * I.sq(wave) * k, "!5f!D!7m!N!5 (Jy)"
+    raise ValueError(f"units must be one of {list(UNITS)}")
+
+
+def tellcor_basic(st, restore=True, temp=None, vmag=None, units="ergs s-1 cm-2 A-1", shifts=None):
+    """
+    XTELLCOR_BASIC_TELLCOR: the object divided by the (shifted) standard.
+
+    With `restore` (XTELLCOR_BASIC's default, 'Restore Continuum: Yes') the
+    ratio is multiplied by a blackbody of temperature `temp` (K) scaled to
+    V magnitude `vmag` (3.46e-9 x 10^(-0.4 (V - 0.03)) erg s-1 cm-2 A-1 at
+    5556 A), both FLOAT fields. The units conversion runs in either case,
+    so without the restore a unitless ratio is converted too, as in IDL. An
+    object order the standard lacks ends that aperture's loop (goto, cont):
+    it and the later orders stay as loaded. Flags are not combined.
+    """
+    if shifts is not None:
+        st["shift"] = shifts_array(st, shifts)
+    if restore:
+        if temp is None or vmag is None:
+            raise ValueError("The blackbody needs a temperature and a V magnitude.")
+        temp, vmag = np.float32(temp), np.float32(vmag)
+    std = st["std"]["spec"]
+    obj = st["obj"]["spec"].copy()
+    naps = st["objnaps"]
+    nytitle = ""
+    for i in range(naps):
+        for j, o in enumerate(st["objorders"]):
+            k = j * naps + i
+            if o not in st["stdorders"]:
+                break
+            z = st["stdorders"].index(o)
+            sflux, serror = interpspec(std[z, 0], std[z, 1], obj[k, 0], iyerror=std[z, 2])
+            one = np.float32(1.0)
+            tflux = one / sflux
+            terror = (one / I.sq(sflux)) * serror
+            x = np.arange(sflux.size, dtype=np.float32)
+            stflux, sterror = interpspec(x + st["shift"][j, i], tflux, x, iyerror=terror)
+            cor = obj[k, 1] * stflux
+            cerr = np.sqrt(I.sq(stflux) * I.sq(obj[k, 2]) + I.sq(obj[k, 1]) * I.sq(sterror))
+            if restore:
+                bbv = planck(5556, temp)
+                scale = np.float32(3.46e-9) * I.fpow(10, np.float32(-0.4) * (vmag - np.float32(0.03))) / bbv
+                bb = planck(obj[k, 0] * np.float32(10000.), temp) * scale
+                cor = cor * bb
+                cerr = cerr * bb
+            cor, cerr, nytitle = _basic_units(obj[k, 0], cor, cerr, units)
+            obj[k, 1] = cor
+            obj[k, 2] = cerr
+    st.update(corrected=obj, restore=restore, temp=temp, vmag=vmag, units=units, nytitle=nytitle)
+    return obj
+
+
+def write_basic(path, st, std_name=None):
+    """
+    XTELLCOR_BASIC_TELLCOR's file: the object's header with IRAFNAME (the
+    output name), YUNITS and YTITLE (units and title; 'None' and '!5Ratio ()'
+    without the restore) and the history under 'Xtellcor Basic History'.
+    `std_name` is the standard's file name as typed (by default its base name).
+    """
+    stdfile = os.path.basename(st["std_path"]) if std_name is None else std_name
+    hist = "The spectra were divided by the spectra of the standard star " + stdfile.strip() + "."
+    if st["restore"]:
+        hist += ("  The spectra were also multiplied by a  blackbody with a temperature of "
+                 + _fstr(st["temp"]) + " K scaled to a V-band magnitude of "
+                 + f"{float(st['vmag']):6.3f}" + ".")
+        yunits, ytitle = st["units"], st["nytitle"]
+    else:
+        yunits, ytitle = "None", "!5Ratio ()"
+        hist += " Therefore the spectrum is unitless."
+    hdr = st["obj"]["header"].copy()
+    I.fxaddpar(hdr, "IRAFNAME", os.path.basename(path).strip(),
+               I.fxcomment(hdr, "IRAFNAME") if "IRAFNAME" in hdr else "")
+    I.fxaddpar(hdr, "YUNITS", yunits, "Units of the Y axis")
+    I.fxaddpar(hdr, "YTITLE", ytitle, "IDL Y Title")
+    I.addhistlabel(hdr, "Xtellcor Basic History")
+    I.sxaddhist(hdr, hist)
+    fits.PrimaryHDU(st["corrected"], header=hdr).writeto(path, overwrite=True)

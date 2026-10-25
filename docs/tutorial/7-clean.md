@@ -9,7 +9,8 @@ bridged by a straight line or blanked.
 
 ## What you do
 
-1. Go to **7 Clean & save** and choose **NGC134**.
+1. Go to **7 Clean & save** and choose **NGC134**. The **File** is its merged spectrum; any
+    other of its spectra (corrected or combined, any order and aperture) can be opened too.
 
 ```{shots} 07-clean
 :alt: The final spectrum and its signal-to-noise
@@ -17,15 +18,18 @@ bridged by a straight line or blanked.
 The final spectrum and its signal-to-noise
 ```
 
-The stage shows the merged spectrum (top) and its **signal-to-noise ratio** (bottom): about
+The stage shows the spectrum (top) and its **signal-to-noise ratio** (bottom): about
 100–200 per pixel in the J, H and K windows, dropping in the opaque gaps.
 
-2. **Smoothing** — choose *Savitzky-Golay* (a moving polynomial that keeps line shapes) or
-    *Gaussian*, with a width in pixels, or *None*.
-3. **Fix** or **Remove** a region — drag across it on the plot, then press *Fix* (a straight
-    line between its ends) or *Remove* (blanked). *Undo all* reverts the repairs.
-4. Press **Smooth and save**. The result is `proc/NGC134_clean.fits`; **Also write a text table**
-    saves it as columns of wavelength, flux, error and flag.
+2. **Fix** or **Remove** a region: drag across it on the plot, then press *Fix* (a straight
+    line between its ends) or *Remove* (blanked), for the flux and its error or, with *Edit:
+    Error*, for the error only. As in the IDL tool, edits are drawn on a working copy:
+    **Keep** makes them stick, **Undo** goes back to the last Keep.
+3. **Smoothing**: choose *Savitzky-Golay* (a moving polynomial that keeps line shapes) or
+    *Gaussian*, with a width in pixels, and press **Smooth**. It starts from the kept
+    spectrum, and is allowed once per file opened, as in the IDL tool.
+4. Press **Save**: the kept spectrum is written to `proc/NGC134_clean.fits`. **Also write a
+    text table** writes it as the IDL tool's SPEX2TEXT does, header and every order included.
 
 :::{admonition} Smoothing and resolution
 :class: warning

@@ -146,6 +146,8 @@ pro ref_dg
     ow = obj[*,0,i] & oflx = obj[*,1,i] & t = mc_nantrim(ow,2) & ow = ow[t] & oflx = oflx[t]
     tw = tellspec[*,0,i] & tf = tellspec[*,1,i] & t = mc_nantrim(tw,2) & tw = tw[t] & tf = tf[t]
     mc_interpspec,tw,tf,ow,nflx
+    ; XMC_FINDSHIFT_SETUP normalizes the object by the maximum of its 4-pixel running median
+    smooth = median(oflx,4) & oflx = oflx/max(smooth,/NAN)
     z = where(ow gt sr[0,i] and ow lt sr[1,i])
     sh = findgen(151)/50.+(0.-1.5) & rmsv = fltarr(151) & x2 = findgen(n_elements(nflx))
     for k=0,150 do begin

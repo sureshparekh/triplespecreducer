@@ -24,7 +24,10 @@ pixel — with one exception, the telluric kernel, explained below.
 | | CuHeAr arc lamp: offset, lines per order, 1D solution, traced lines, both images | **identical** |
 | extraction | A−B work image | **identical** |
 | | spatial profiles, aperture positions, trace coefficients | **identical** |
-| | point-source spectra (2 apertures × 5 orders, PS background) | **identical** |
+| | point-source spectra, optimal (the interface's default: background on, PSF radius 2.2″, spatial map; also with the median profile) | **identical** |
+| | point-source spectra summed (background off; and with background, the old reference) | **identical** |
+| | aperture positions typed (Guess, Fix), imported trace, a subset of orders, A mode with two apertures | **identical** |
+| | without a wavecal file (pixels): point source optimal and summed, extended source with background and bad-pixel fixing | **identical** |
 | | extended-source spectra (5 orders) | **identical** |
 | | the six spectrum files written by the A−B extraction | **identical** |
 | combine | scale factors, combined spectra (point and extended source) | **identical** |
@@ -33,8 +36,19 @@ pixel — with one exception, the telluric kernel, explained below.
 | | telluric spectrum (given IDL's kernel) | **identical** |
 | | shifts found on the object (autofind) | **identical** |
 | | corrected object spectrum | **identical** |
+| combine (options) | spectra left out of an order, ranges masked: all nine statistics, as IDL computes them | **identical** |
+| | scaling to a chosen spectrum, over a chosen range; no scaling; `/BASIC` header; history | **identical** |
+| telluric (other routes) | `xtellcor_basic` (blackbody restore, units, a standard missing an order) | **identical** |
+| | `xtellcor_finish` (an existing telluric spectrum, its shift) | **identical** |
+| | the model output (`_modVega`) | **identical** |
 | merge | merged spectrum; with automatic scale, trims and a gap | **identical** |
+| | automatic scale found before the cuts, green and blue cut on one order | **identical** |
 | clean | Gaussian, Savitzky–Golay | **identical** |
+| | edits kept, undone and lost to smoothing; error-only edits | **identical** |
+| | `xgetoffset` line fits and offsets on three sky lines | **identical** |
+| | text export (`spex2text`), character for character | **identical** |
+| calibration branches | one flat frame, darks or none, one wavecal frame, a typed offset | **identical** |
+| | QA: the residual plots' values, the rejected-line lists, the arc overlays | **identical** |
 | options | combined image (A−B, ABBA→ABAB) and its A-mode extraction | **identical** |
 | | combined image with the sky subtracted (`mc_subspecsky`) | **identical** |
 | | `xcleanspec` fix and remove of a region | **identical** |
@@ -47,9 +61,12 @@ pixel — with one exception, the telluric kernel, explained below.
 ## The chain
 
 The table compares each stage on IDL's input. `validation/compare_chain.py` runs the stages
-as a chain instead — flat, wavelength calibration, extraction of four pairs, combination —
-each Python stage reading only the files the Python stage before it wrote, and compares every
-file with IDL's chain: **all data and all header cards are identical**. This matters because
+as a chain instead — flat, wavelength calibration, extraction, combination, telluric
+correction, merging and cleaning — each Python stage reading only the files the Python stage
+before it wrote, and compares every file with IDL's chain run at the interface's defaults
+(the standard extracted optimally, as the IDL tool does it): **all data, all header cards and
+every history line are identical**, the telluric kernel apart (below). A second chain with
+the standard summed instead is compared the same way. This matters because
 Spextool passes numbers between steps as header text (see [Behaviour of the IDL tool](idl_differences.md)): the order
 edges the wavelength calibration uses are the flat file's 12-digit values, not the fit's full
 precision, and the dispersions the telluric step uses are the wavelength file's 6-digit ones.
